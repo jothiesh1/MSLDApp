@@ -53,15 +53,7 @@ android {
         }
     }
 
-    sourceSets["main"].jniLibs.srcDir("libs") // For HERE native libs
-}
-
-repositories {
-    google()
-    mavenCentral()
-    flatDir {
-        dirs("libs") // For AAR support
-    }
+    sourceSets["main"].jniLibs.srcDir("libs") // ✅ For native HERE SDK libraries
 }
 
 dependencies {
