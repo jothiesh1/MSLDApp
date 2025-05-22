@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.gpstracker.msldapp"
     compileSdk = 35
+    sourceSets["main"].jniLibs.srcDir("libs")
 
     defaultConfig {
         applicationId = "com.gpstracker.msldapp"
@@ -53,20 +54,63 @@ android {
         }
     }
 
-    sourceSets["main"].jniLibs.srcDir("libs") // ✅ For native HERE SDK libraries
+    // Required for HERE SDK native libraries
+    sourceSets["main"].jniLibs.srcDir("libs")
 }
 
 dependencies {
+
+    implementation(files("libs/usbSerialForAndroid-debug.aar"))
+    // HERE SDK extracted JAR
+    implementation(files("libs/classes.jar"))
+
+    // AndroidX Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.appcompat)
+
+    // Compose
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.play.services.location)
+    implementation("androidx.compose.material:material-icons-extended:1.5.4")
 
+    // Navigation
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+
+    // Location Services
+    implementation(libs.play.services.location)
+    implementation("com.google.android.gms:play-services-location:21.0.1")
+
+    // Networking
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.json:json:20240303")
+
+    // Image Loading
+    implementation("com.squareup.picasso:picasso:2.8")
+
+    // UI + Material
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("com.google.android.material:material:1.9.0")
+
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // HERE SDK support
+    implementation(libs.filament.android)
+
+    // Animations
+    implementation(libs.androidx.animation.android)
+
+
+
+
+
+
+    // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -74,11 +118,4 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
-
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("androidx.legacy:legacy-support-v4:1.0.0")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
-
-    // ✅ Local HERE SDK AAR file
-    implementation(files("libs/heresdk-explore-android-4.22.3.0.189590.aar"))
 }

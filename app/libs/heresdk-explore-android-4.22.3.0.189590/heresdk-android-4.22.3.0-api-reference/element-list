@@ -1,0 +1,17 @@
+com.here
+com.here.sdk.animation
+com.here.sdk.core
+com.here.sdk.core.engine
+com.here.sdk.core.errors
+com.here.sdk.core.threading
+com.here.sdk.core.utilities
+com.here.sdk.engine
+com.here.sdk.gestures
+com.here.sdk.mapview
+com.here.sdk.mapview.datasource
+com.here.sdk.navigation
+com.here.sdk.routing
+com.here.sdk.search
+com.here.sdk.traffic
+com.here.sdk.transport
+com.here.time

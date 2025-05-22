@@ -1,16 +1,26 @@
-package com.gpstracker.msldapp
+package com.gpstracker.msldapp.utils
 
-import androidx.compose.runtime.Composable
+import android.util.Log
 import androidx.navigation.NavHostController
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import com.gpstracker.msldapp.uis.DashboardScreen
-import com.gpstracker.msldapp.uis.HereMapScreen
 
-@Composable
-fun AppNavigator(navController: NavHostController) {
-    NavHost(navController = navController, startDestination = "dashboard") {
-        composable("dashboard") { DashboardScreen(navController) }
-        composable("heremap") { HereMapScreen(navController) }
+object AppNavigator {
+    private var navController: NavHostController? = null
+
+    fun setController(controller: NavHostController) {
+        navController = controller
+        Log.d("AppNavigator", "NavController set: $controller")
+    }
+
+    fun navigate(route: String) {
+        if (navController == null) {
+            Log.e("AppNavigator", "❌ NavController is NULL! Cannot navigate to $route")
+        } else {
+            Log.d("AppNavigator", "✅ Navigating to: $route")
+            navController?.navigate(route)
+        }
+    }
+
+    fun popBackStack() {
+        navController?.popBackStack()
     }
 }
