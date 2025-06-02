@@ -18,9 +18,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MSLDApp"
+        android:requestLegacyExternalStorage="true"
         tools:targetApi="31">
 
-        <!-- HERE SDK required metadata (updated credentials) -->
+        <!-- HERE SDK required metadata -->
         <meta-data
             android:name="com.here.android.maps.appid"
             android:value="gpsthinutre" />
