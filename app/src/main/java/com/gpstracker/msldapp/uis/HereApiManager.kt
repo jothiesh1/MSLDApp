@@ -13,6 +13,8 @@ import java.io.IOException
 
 object HereApiManager {
 
+    /*
+
     private const val TAG = "HereAPI"
     private const val CLIENT_ID = "L7tvWlgQEscYWBCO23QqYA"
     private const val CLIENT_SECRET = "K-mv-j4q-3zDTYtfrSbhxSBXar7lULggsB4a2PBuG-B60D1g-5vc2QxNjkgvStnmSMEgAMPTi-9FkMboRWsYTA"
@@ -190,5 +192,5 @@ object HereApiManager {
         else
             "--"
     }
-
+*/
 }
