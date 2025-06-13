@@ -1,0 +1,48 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.gpstracker.msldapp">
+
+    <!-- Permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <application
+        android:name=".MyApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MSLDApp"
+        android:requestLegacyExternalStorage="true"
+        tools:targetApi="31">
+
+        <!-- HERE SDK required metadata -->
+        <meta-data
+            android:name="com.here.android.maps.appid"
+            android:value="gpsthinutre" />
+        <meta-data
+            android:name="com.here.android.maps.apptoken"
+            android:value="4GAVLXnyMJS0nOoVHdCD" />
+        <meta-data
+            android:name="com.here.android.maps.license.key"
+            android:value="qxKQUslBgp1p0-AneKlaHV9k_sLn4hOM6-n-ktM52IiesKXRHC9j4QkVR6AC2JI8iDSktCyOHXi9qgcsSDmb8g" />
+
+        <!-- Main activity -->
+        <activity
+            android:name=".uis.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.MSLDApp">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>
