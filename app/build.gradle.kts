@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.gpstracker.msldapp.speedlimit"  // ⚠️ Different package
+        applicationId = "com.gpstracker.msldapp.speedlimited.dubai1"
         minSdk = 28
         targetSdk = 35
         versionCode = 2
@@ -31,6 +31,27 @@ android {
         debug {
             isMinifyEnabled = false
             isDebuggable = true
+        }
+    }
+
+    // 🔥 CORRECTED: Use androidResources instead of aaptOptions for Kotlin DSL
+    androidResources {
+        noCompress("json")  // Prevent JSON compression for faster reading
+    }
+
+    // 🔥 REMOVED: dexOptions is deprecated in Kotlin DSL
+    // The heap size is now controlled via gradle.properties
+
+    // 🔥 ADD THIS FOR SMALLER APK SIZE - Already correct syntax
+    bundle {
+        language {
+            enableSplit = true
+        }
+        density {
+            enableSplit = true
+        }
+        abi {
+            enableSplit = true
         }
     }
 
@@ -117,19 +138,15 @@ dependencies {
     implementation("org.mapsforge:mapsforge-map-android:0.19.0")
     implementation("org.mapsforge:mapsforge-map:0.19.0")
     implementation("org.mapsforge:mapsforge-map-reader:0.19.0")
-    implementation ("org.mapsforge:mapsforge-core:0.20.0")
-    implementation ("org.mapsforge:mapsforge-map-reader:0.20.0")
+    implementation("org.mapsforge:mapsforge-core:0.20.0")
+    implementation("org.mapsforge:mapsforge-map-reader:0.20.0")
 
-
-    implementation ("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(libs.firebase.database.ktx)
-    implementation(libs.androidx.foundation.android)
     implementation(libs.androidx.foundation.android)
 
     // Testing
     testImplementation(libs.junit)
-    testImplementation(libs.junit.jupiter)
-    testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -138,16 +155,16 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 
-    implementation ("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-
-
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     // Compose
-    implementation ("androidx.compose.ui:ui")
-    implementation ("androidx.compose.material3:material3")
-    implementation ("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+
+    // 🔥 GSON IS ALREADY THERE - GOOD!
     implementation("com.google.code.gson:gson:2.10.1")
 }
 

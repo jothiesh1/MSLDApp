@@ -1,313 +1,284 @@
+// File: app/src/main/java/com/gpstracker/msldapp/uis/LogCollector.kt
+
 package com.gpstracker.msldapp.uis
 
-import androidx.compose.runtime.mutableStateListOf
+import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.CopyOnWriteArrayList
 
+/**
+ * Thread-safe log collector for high-speed GPS tracking
+ * Optimized for performance and memory efficiency
+ */
 object LogCollector {
-    private val logs = mutableStateListOf<String>()
-    private val maxLogs = 500 // Keep more logs for detailed debugging
-    private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
-    // Log categories for filtering
     enum class LogCategory {
-        GPS, OSM, SPEED, PERMISSION, ERROR, INFO, DEBUG, JSON, BACKEND
+        GPS, OSM, BACKEND, PERMISSION, JSON, DEBUG, ERROR, INFO
     }
 
-    data class LogEntry(
-        val timestamp: Long,
-        val category: LogCategory,
-        val message: String,
-        val details: Map<String, Any> = emptyMap()
-    )
+    // Thread-safe list for concurrent access
+    private val logs = CopyOnWriteArrayList<String>()
+    private const val MAX_LOGS = 200 // Increased for debugging
 
-    private val detailedLogs = mutableStateListOf<LogEntry>()
+    // Performance counters
+    private var gpsUpdateCount = 0
+    private var osmLookupCount = 0
+    private var ttlSendCount = 0
+    private var errorCount = 0
 
     /**
-     * Add a simple log message (backward compatibility)
+     * Add a simple log message
      */
     fun addLog(message: String) {
-        val timestamp = System.currentTimeMillis()
-        val formattedTime = dateFormat.format(Date(timestamp))
-        val logLine = "[$formattedTime] $message"
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        val logMsg = "[$timestamp] $message"
 
-        logs.add(logLine)
+        synchronized(logs) {
+            logs.add(logMsg)
 
-        // Auto-categorize based on message content
-        val category = categorizeMessage(message)
-        detailedLogs.add(LogEntry(timestamp, category, message))
-
-        // Keep only recent logs
-        if (logs.size > maxLogs) {
-            logs.removeAt(0)
+            // Keep only recent logs for memory efficiency
+            if (logs.size > MAX_LOGS) {
+                repeat(logs.size - (MAX_LOGS * 3 / 4)) {
+                    if (logs.isNotEmpty()) {
+                        logs.removeAt(0)
+                    }
+                }
+            }
         }
-        if (detailedLogs.size > maxLogs) {
-            detailedLogs.removeAt(0)
-        }
+
+        // Also log to Android logcat for debugging
+        Log.d("MSLD_Tracker", message)
     }
 
     /**
-     * Add detailed log with category and additional data
+     * Add detailed log with category and metadata
      */
     fun addDetailedLog(
         category: LogCategory,
         message: String,
-        details: Map<String, Any> = emptyMap()
+        details: Map<String, String> = emptyMap()
     ) {
-        val timestamp = System.currentTimeMillis()
-        val formattedTime = dateFormat.format(Date(timestamp))
-        val categoryIcon = getCategoryIcon(category)
-        val logLine = "[$formattedTime] $categoryIcon $message"
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
 
-        logs.add(logLine)
-        detailedLogs.add(LogEntry(timestamp, category, message, details))
+        val logMessage = if (details.isNotEmpty()) {
+            val detailsStr = details.entries.joinToString(", ") { "${it.key}: ${it.value}" }
+            "$message [$detailsStr]"
+        } else {
+            message
+        }
 
-        // Add detailed info if available
-        if (details.isNotEmpty()) {
-            details.forEach { (key, value) ->
-                logs.add("    └─ $key: $value")
+        val fullMessage = "[$timestamp] [${category.name}] $logMessage"
+
+        synchronized(logs) {
+            logs.add(fullMessage)
+
+            // Update counters
+            when (category) {
+                LogCategory.GPS -> gpsUpdateCount++
+                LogCategory.OSM -> osmLookupCount++
+                LogCategory.BACKEND -> if (message.contains("sent")) ttlSendCount++
+                LogCategory.ERROR -> errorCount++
+                else -> {}
+            }
+
+            // Memory management
+            if (logs.size > MAX_LOGS) {
+                repeat(logs.size - (MAX_LOGS * 3 / 4)) {
+                    if (logs.isNotEmpty()) {
+                        logs.removeAt(0)
+                    }
+                }
             }
         }
 
-        // Keep only recent logs
-        if (logs.size > maxLogs) {
-            logs.removeAt(0)
-        }
-        if (detailedLogs.size > maxLogs) {
-            detailedLogs.removeAt(0)
+        // Log to Android logcat with appropriate level
+        when (category) {
+            LogCategory.ERROR -> Log.e("MSLD_${category.name}", logMessage)
+            LogCategory.GPS, LogCategory.OSM -> Log.d("MSLD_${category.name}", logMessage)
+            else -> Log.i("MSLD_${category.name}", logMessage)
         }
     }
 
     /**
-     * Log GPS location with full details
+     * Log errors with exception details
+     */
+    fun logError(message: String, exception: Exception? = null) {
+        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+
+        val errorMessage = if (exception != null) {
+            "$message: ${exception.javaClass.simpleName} - ${exception.message}"
+        } else {
+            message
+        }
+
+        val fullMessage = "[$timestamp] [ERROR] $errorMessage"
+
+        synchronized(logs) {
+            logs.add(fullMessage)
+            errorCount++
+
+            if (logs.size > MAX_LOGS) {
+                repeat(logs.size - (MAX_LOGS * 3 / 4)) {
+                    if (logs.isNotEmpty()) {
+                        logs.removeAt(0)
+                    }
+                }
+            }
+        }
+
+        // Log to Android logcat as error
+        Log.e("MSLD_ERROR", errorMessage, exception)
+    }
+
+    /**
+     * Log GPS location updates (optimized for high frequency)
      */
     fun logGPSLocation(location: LocationData) {
-        addDetailedLog(
-            LogCategory.GPS,
-            "Location Update",
-            mapOf(
-                "Latitude" to String.format("%.7f", location.latitude),
-                "Longitude" to String.format("%.7f", location.longitude),
-                "Accuracy" to "${String.format("%.1f", location.accuracy)}m",
-                "Speed" to "${String.format("%.1f", location.speedKmh)} km/h",
-                "Altitude" to "${location.altitude.toInt()}m",
-                "Bearing" to "${location.bearing.toInt()}°",
-                "Provider" to location.provider,
-                "Timestamp" to SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(location.timestamp))
+        // Only log every 5th GPS update to reduce spam
+        if (gpsUpdateCount % 5 == 0 || location.speedKmh > 80f) {
+            addDetailedLog(
+                LogCategory.GPS,
+                "GPS Update #${gpsUpdateCount + 1}",
+                mapOf(
+                    "Speed" to "${String.format("%.1f", location.speedKmh)} km/h",
+                    "Accuracy" to "${String.format("%.1f", location.accuracy)}m",
+                    "Provider" to location.provider
+                )
             )
-        )
+        }
+        gpsUpdateCount++
     }
 
     /**
-     * Log OSM speed limit lookup with detailed results
+     * Log OSM speed limit lookups
      */
-    fun logOSMSpeedLookup(
-        lat: Double,
-        lon: Double,
-        result: OsmOfflineSpeedLookup.SpeedLimitInfo?
-    ) {
-        if (result != null) {
-            addDetailedLog(
-                LogCategory.OSM,
-                "OSM Speed Limit Found",
-                mapOf(
-                    "Coordinates" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
-                    "Speed Limit" to "${result.speedLimit} ${result.unit}",
-                    "Road Name" to (result.roadName ?: "Unknown"),
-                    "Road Type" to (result.roadType ?: "Unknown"),
-                    "Source" to result.source
+    fun logOSMSpeedLookup(lat: Double, lon: Double, result: Any?) {
+        osmLookupCount++
+
+        when (result) {
+            is OsmOfflineSpeedLookup.SpeedLimitInfo -> {
+                addDetailedLog(
+                    LogCategory.OSM,
+                    "OSM Lookup #$osmLookupCount",
+                    mapOf(
+                        "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
+                        "Result" to "${result.speedLimit ?: "No data"} km/h",
+                        "Road" to (result.roadName ?: "Unknown"),
+                        "Source" to result.source
+                    )
                 )
-            )
-        } else {
-            addDetailedLog(
-                LogCategory.OSM,
-                "No OSM Speed Limit Data",
-                mapOf(
-                    "Coordinates" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
-                    "Reason" to "No speed limit data in OSM for this area"
+            }
+            else -> {
+                addDetailedLog(
+                    LogCategory.OSM,
+                    "OSM Lookup #$osmLookupCount",
+                    mapOf(
+                        "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
+                        "Result" to "No data"
+                    )
                 )
-            )
+            }
         }
     }
 
     /**
-     * Log JSON data operations
+     * Log backend operations (TTL, etc.)
      */
-    fun logJSONOperation(operation: String, details: Map<String, Any> = emptyMap()) {
-        addDetailedLog(LogCategory.JSON, operation, details)
-    }
-
-    /**
-     * Log backend system operations
-     */
-    fun logBackendOperation(operation: String, details: Map<String, Any> = emptyMap()) {
+    fun logBackendOperation(operation: String, details: Map<String, String>) {
         addDetailedLog(LogCategory.BACKEND, operation, details)
     }
 
     /**
-     * Log speed comparison results
+     * Get all logs as a list
      */
-    fun logSpeedComparison(
-        currentSpeed: Float,
-        speedLimit: Int?,
-        isOverLimit: Boolean
-    ) {
-        speedLimit?.let { limit ->
-            val speedDiff = currentSpeed - limit
-            addDetailedLog(
-                LogCategory.SPEED,
-                if (isOverLimit) "Speed Limit Exceeded" else "Speed Within Limit",
-                mapOf(
-                    "Current Speed" to "${String.format("%.1f", currentSpeed)} km/h",
-                    "Speed Limit" to "$limit km/h",
-                    "Difference" to "${String.format("%.1f", speedDiff)} km/h",
-                    "Status" to if (isOverLimit) "⚠️ OVER LIMIT" else "✅ WITHIN LIMIT"
-                )
-            )
-        }
+    fun getLogs(): List<String> {
+        return logs.toList()
     }
 
     /**
-     * Log system errors with stack traces
+     * Get recent logs (last N entries)
      */
-    fun logError(message: String, exception: Exception? = null) {
-        val details = mutableMapOf<String, Any>(
-            "Error Message" to message
-        )
-
-        exception?.let { e ->
-            details["Exception Type"] = e.javaClass.simpleName
-            details["Exception Message"] = e.message ?: "No message"
-            details["Stack Trace"] = e.stackTrace.take(3).joinToString("\n") {
-                "  at ${it.className}.${it.methodName}(${it.fileName}:${it.lineNumber})"
-            }
-        }
-
-        addDetailedLog(LogCategory.ERROR, message, details)
-    }
-
-    /**
-     * Get all logs (backward compatibility)
-     */
-    fun getLogs(): List<String> = logs.toList()
-
-    /**
-     * Get detailed logs with filtering
-     */
-    fun getDetailedLogs(category: LogCategory? = null): List<LogEntry> {
-        return if (category != null) {
-            detailedLogs.filter { it.category == category }
-        } else {
-            detailedLogs.toList()
-        }
-    }
-
-    /**
-     * Get logs by category as formatted strings
-     */
-    fun getLogsByCategory(category: LogCategory): List<String> {
-        return detailedLogs
-            .filter { it.category == category }
-            .map { entry ->
-                val time = dateFormat.format(Date(entry.timestamp))
-                val icon = getCategoryIcon(entry.category)
-                val details = if (entry.details.isNotEmpty()) {
-                    "\n" + entry.details.map { "    ${it.key}: ${it.value}" }.joinToString("\n")
-                } else ""
-                "[$time] $icon ${entry.message}$details"
-            }
-    }
-
-    /**
-     * Get system statistics
-     */
-    fun getSystemStats(): Map<String, Any> {
-        val now = System.currentTimeMillis()
-        val recentLogs = detailedLogs.filter { now - it.timestamp < 60000 } // Last minute
-
-        return mapOf(
-            "Total Logs" to detailedLogs.size,
-            "Recent Logs (1min)" to recentLogs.size,
-            "GPS Updates" to detailedLogs.count { it.category == LogCategory.GPS },
-            "OSM Lookups" to detailedLogs.count { it.category == LogCategory.OSM },
-            "Speed Checks" to detailedLogs.count { it.category == LogCategory.SPEED },
-            "Errors" to detailedLogs.count { it.category == LogCategory.ERROR },
-            "JSON Operations" to detailedLogs.count { it.category == LogCategory.JSON },
-            "Backend Operations" to detailedLogs.count { it.category == LogCategory.BACKEND },
-            "Uptime" to "${(now - (detailedLogs.firstOrNull()?.timestamp ?: now)) / 1000}s"
-        )
+    fun getRecentLogs(count: Int = 20): List<String> {
+        return logs.takeLast(count)
     }
 
     /**
      * Clear all logs
      */
     fun clearLogs() {
-        logs.clear()
-        detailedLogs.clear()
-        addLog("📝 Logs cleared")
+        synchronized(logs) {
+            logs.clear()
+            gpsUpdateCount = 0
+            osmLookupCount = 0
+            ttlSendCount = 0
+            errorCount = 0
+        }
+        Log.i("MSLD_LogCollector", "Logs cleared")
     }
 
     /**
-     * Export logs as formatted string
+     * Get system statistics
+     */
+    fun getSystemStats(): Map<String, String> {
+        val runtime = Runtime.getRuntime()
+        val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+        val maxMemory = runtime.maxMemory() / 1024 / 1024
+        val memoryPercent = (usedMemory * 100 / maxMemory)
+
+        return mapOf(
+            "Total Logs" to logs.size.toString(),
+            "GPS Updates" to gpsUpdateCount.toString(),
+            "OSM Lookups" to osmLookupCount.toString(),
+            "TTL Sends" to ttlSendCount.toString(),
+            "Errors" to errorCount.toString(),
+            "Memory Usage" to "${usedMemory}MB/${maxMemory}MB (${memoryPercent}%)"
+        )
+    }
+
+    /**
+     * Get performance summary
+     */
+    fun getPerformanceSummary(): String {
+        val stats = getSystemStats()
+        return buildString {
+            appendLine("📊 PERFORMANCE SUMMARY:")
+            appendLine("• GPS Updates: ${stats["GPS Updates"]}")
+            appendLine("• OSM Lookups: ${stats["OSM Lookups"]}")
+            appendLine("• TTL Sends: ${stats["TTL Sends"]}")
+            appendLine("• Errors: ${stats["Errors"]}")
+            appendLine("• Memory: ${stats["Memory Usage"]}")
+            appendLine("• Log Entries: ${stats["Total Logs"]}")
+        }
+    }
+
+    /**
+     * Get logs by category
+     */
+    fun getLogsByCategory(category: LogCategory): List<String> {
+        return logs.filter { it.contains("[${category.name}]") }
+    }
+
+    /**
+     * Export logs as text (for sharing/debugging)
      */
     fun exportLogs(): String {
+        val stats = getSystemStats()
         return buildString {
-            appendLine("🚗 GPS Speed Limit Tracker - Log Export")
-            appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
-            appendLine("Total Entries: ${logs.size}")
-            appendLine("=".repeat(50))
+            appendLine("=== MSLD HIGH-SPEED TRACKER LOGS ===")
+            appendLine("Export Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
             appendLine()
-
+            appendLine("STATISTICS:")
+            stats.forEach { (key, value) ->
+                appendLine("$key: $value")
+            }
+            appendLine()
+            appendLine("LOGS:")
             logs.forEach { log ->
                 appendLine(log)
             }
-
             appendLine()
-            appendLine("=".repeat(50))
-            appendLine("📊 System Statistics:")
-            getSystemStats().forEach { (key, value) ->
-                appendLine("$key: $value")
-            }
+            appendLine("=== END OF LOGS ===")
         }
-    }
-
-    // Helper functions
-    private fun categorizeMessage(message: String): LogCategory {
-        return when {
-            message.contains("GPS", ignoreCase = true) ||
-                    message.contains("Location", ignoreCase = true) -> LogCategory.GPS
-            message.contains("OSM", ignoreCase = true) ||
-                    message.contains("speed limit", ignoreCase = true) -> LogCategory.OSM
-            message.contains("Speed:", ignoreCase = true) ||
-                    message.contains("over limit", ignoreCase = true) -> LogCategory.SPEED
-            message.contains("permission", ignoreCase = true) -> LogCategory.PERMISSION
-            message.contains("Error", ignoreCase = true) ||
-                    message.contains("Failed", ignoreCase = true) -> LogCategory.ERROR
-            message.contains("JSON", ignoreCase = true) -> LogCategory.JSON
-            message.contains("Backend", ignoreCase = true) ||
-                    message.contains("System", ignoreCase = true) -> LogCategory.BACKEND
-            else -> LogCategory.INFO
-        }
-    }
-
-    private fun getCategoryIcon(category: LogCategory): String {
-        return when (category) {
-            LogCategory.GPS -> "📍"
-            LogCategory.OSM -> "🗺️"
-            LogCategory.SPEED -> "🚀"
-            LogCategory.PERMISSION -> "🔐"
-            LogCategory.ERROR -> "❌"
-            LogCategory.INFO -> "ℹ️"
-            LogCategory.DEBUG -> "🔧"
-            LogCategory.JSON -> "📄"
-            LogCategory.BACKEND -> "⚙️"
-        }
-    }
-
-    /**
-     * Legacy method for compatibility
-     */
-    fun log(message: String) {
-        addLog(message)
     }
 }
