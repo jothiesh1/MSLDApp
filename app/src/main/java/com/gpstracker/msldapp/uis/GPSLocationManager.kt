@@ -25,7 +25,9 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlin.math.*
+import java.util.ArrayDeque
 
+// 🆕 Enhanced LocationData with car direction
 data class LocationData(
     val latitude: Double,
     val longitude: Double,
@@ -35,11 +37,12 @@ data class LocationData(
     val altitude: Double,
     val bearing: Float,
     val timestamp: Long,
-    val provider: String
+    val provider: String,
+    val carDirection: Float? = null  // 🆕 Car direction from GPS track in degrees (0-360)
 )
 
 /**
- * HIGH PRECISION GPS Location Manager
+ * HIGH PRECISION GPS Location Manager with CAR DIRECTION TRACKING
  * Features:
  * - Consistent speed detection
  * - Reliable TTL sending
@@ -47,6 +50,9 @@ data class LocationData(
  * - Multi-constellation GNSS support
  * - Kalman filtering for smoother tracking
  * - Advanced satellite monitoring
+ * - 🆕 CAR DIRECTION TRACKING from GPS movement
+ * - 🆕 Stable direction calculation from location history
+ * - 🆕 Direction smoothing and validation
  */
 class GPSLocationManager(private val context: Context) {
 
@@ -83,27 +89,172 @@ class GPSLocationManager(private val context: Context) {
     private val recentLocations = mutableListOf<Location>()
     private val maxLocationHistory = 5  // Max locations to store for averaging
 
+    // 🆕 CAR DIRECTION TRACKER - Inner class for direction calculation
+    inner class CarDirectionTracker {
+        private val locationHistory = ArrayDeque<LocationData>()
+        private val maxHistorySize = 8  // Keep last 8 positions for direction calculation
+        private var lastStableDirection: Float? = null
+        private var directionConfidenceCount = 0
+        private val minConfidenceForDirection = 3  // Need 3 consistent readings
+
+        /**
+         * 🆕 Update location and calculate car direction from GPS track
+         */
+        fun updateLocation(location: LocationData): Float? {
+            // Add to history
+            locationHistory.addLast(location)
+            if (locationHistory.size > maxHistorySize) {
+                locationHistory.removeFirst()
+            }
+
+            // Need at least 3 points for direction calculation
+            if (locationHistory.size < 3) {
+                return lastStableDirection
+            }
+
+            // Calculate direction from GPS track
+            val calculatedDirection = calculateStableDirection()
+
+            if (calculatedDirection != null) {
+                // Validate and smooth direction
+                if (lastStableDirection != null) {
+                    val directionDiff = abs(calculatedDirection - lastStableDirection!!)
+                    val minDiff = min(directionDiff, 360 - directionDiff)
+
+                    // If direction change is reasonable, accept it
+                    if (minDiff <= 45f || location.speedKmh < 10f) {
+                        directionConfidenceCount++
+                        if (directionConfidenceCount >= minConfidenceForDirection) {
+                            lastStableDirection = calculatedDirection
+                        }
+                    } else {
+                        // Large direction change - reset confidence
+                        directionConfidenceCount = 0
+                    }
+                } else {
+                    // First stable direction
+                    lastStableDirection = calculatedDirection
+                    directionConfidenceCount = 1
+                }
+
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.GPS,
+                    "🧭 Direction: ${calculatedDirection.toInt()}° (confidence: $directionConfidenceCount/${minConfidenceForDirection})"
+                )
+
+                return lastStableDirection
+            }
+
+            return lastStableDirection
+        }
+
+        /**
+         * 🆕 Calculate stable direction from location history
+         */
+        private fun calculateStableDirection(): Float? {
+            if (locationHistory.size < 3) return null
+
+            val recent = locationHistory.toList().takeLast(3)
+
+            // Calculate total displacement for more stable direction
+            val start = recent.first()
+            val end = recent.last()
+
+            val deltaTime = (end.timestamp - start.timestamp) / 1000.0 // seconds
+            if (deltaTime < 1.0) return null // Too short time span
+
+            // Calculate bearing from start to end point
+            val dLon = Math.toRadians(end.longitude - start.longitude)
+            val startLatRad = Math.toRadians(start.latitude)
+            val endLatRad = Math.toRadians(end.latitude)
+
+            val y = sin(dLon) * cos(endLatRad)
+            val x = cos(startLatRad) * sin(endLatRad) -
+                    sin(startLatRad) * cos(endLatRad) * cos(dLon)
+
+            var bearing = Math.toDegrees(atan2(y, x))
+            bearing = (bearing + 360) % 360
+
+            // Validate with speed - only trust direction when moving
+            val avgSpeed = recent.map { it.speedKmh }.average()
+            if (avgSpeed < 5f) {
+                // Too slow to determine reliable direction
+                return null
+            }
+
+            // Calculate movement distance to validate
+            val distance = calculateDistance(
+                start.latitude, start.longitude,
+                end.latitude, end.longitude
+            )
+
+            // Must have moved at least 10 meters for reliable direction
+            if (distance < 10.0) return null
+
+            LogCollector.addDetailedLog(
+                LogCollector.LogCategory.GPS,
+                "🧭 Calculated direction: ${bearing.toInt()}° (${String.format("%.1f", avgSpeed)}km/h, ${distance.toInt()}m, ${deltaTime.toInt()}s)"
+            )
+
+            return bearing.toFloat()
+        }
+
+        /**
+         * Get current stable direction
+         */
+        fun getCurrentDirection(): Float? = lastStableDirection
+
+        /**
+         * Reset direction tracking
+         */
+        fun reset() {
+            locationHistory.clear()
+            lastStableDirection = null
+            directionConfidenceCount = 0
+
+            LogCollector.addDetailedLog(
+                LogCollector.LogCategory.GPS,
+                "🧭 Direction tracker reset"
+            )
+        }
+
+        /**
+         * Get direction tracking status
+         */
+        fun getStatus(): Map<String, String> {
+            return mapOf(
+                "History Points" to locationHistory.size.toString(),
+                "Current Direction" to if (lastStableDirection != null) "${lastStableDirection!!.toInt()}°" else "None",
+                "Confidence" to "$directionConfidenceCount/$minConfidenceForDirection",
+                "Status" to if (lastStableDirection != null) "Tracking" else "Acquiring"
+            )
+        }
+    }
+
+    // 🆕 Car direction tracker instance
+    private val carDirectionTracker = CarDirectionTracker()
+
     // Enhanced location request for higher precision
     private fun createLocationRequest(currentSpeed: Float = 0f): LocationRequest {
-        // More frequent updates for better precision
+        // More frequent updates for better precision and direction tracking
         val updateInterval = when {
-            currentSpeed > 60f -> 1000L    // High speed: 1s (faster than original)
-            currentSpeed > 20f -> 2000L    // Medium speed: 2s (faster than original)
-            currentSpeed > 5f -> 3000L     // Low speed: 3s (faster than original)
-            else -> 5000L                  // Stationary: 5s (faster than original)
+            currentSpeed > 60f -> 800L     // High speed: 0.8s (faster for direction)
+            currentSpeed > 20f -> 1500L    // Medium speed: 1.5s (faster for direction)
+            currentSpeed > 5f -> 2500L     // Low speed: 2.5s (faster for direction)
+            else -> 4000L                  // Stationary: 4s (faster for direction)
         }
 
         val fastestInterval = when {
-            currentSpeed > 60f -> 500L     // Very responsive at high speed
-            currentSpeed > 20f -> 1000L    // More responsive at medium speed
-            else -> 2000L                  // Standard for low speed
+            currentSpeed > 60f -> 400L     // Very responsive at high speed
+            currentSpeed > 20f -> 800L     // More responsive at medium speed
+            else -> 1500L                  // Standard for low speed
         }
 
-        // More sensitive distance thresholds for higher precision
+        // More sensitive distance thresholds for better direction tracking
         val minDistance = when {
-            currentSpeed > 60f -> 2f       // Highway: 2m (more sensitive)
-            currentSpeed > 20f -> 1f       // City: 1m (more sensitive)
-            currentSpeed > 5f -> 0.5f      // Slow: 0.5m (more sensitive)
+            currentSpeed > 60f -> 3f       // Highway: 3m (for direction accuracy)
+            currentSpeed > 20f -> 2f       // City: 2m (for direction accuracy)
+            currentSpeed > 5f -> 1f        // Slow: 1m (for direction accuracy)
             else -> 0f                     // Stationary: Any movement
         }
 
@@ -115,7 +266,7 @@ class GPSLocationManager(private val context: Context) {
             setMinUpdateDistanceMeters(minDistance)
             setMaxUpdateDelayMillis(fastestInterval)
             setMinUpdateIntervalMillis(fastestInterval)
-            setWaitForAccurateLocation(true) // Wait for high accuracy (changed from original)
+            setWaitForAccurateLocation(true) // Wait for high accuracy
             setMaxUpdates(Int.MAX_VALUE)
         }.build()
     }
@@ -123,32 +274,34 @@ class GPSLocationManager(private val context: Context) {
     // Improved timeout for faster response
     private val reliableLocationRequest = CurrentLocationRequest.Builder()
         .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
-        .setDurationMillis(10000L) // 10 seconds (faster than original)
-        .setMaxUpdateAgeMillis(0L) // Only fresh locations (improved from original)
+        .setDurationMillis(10000L) // 10 seconds
+        .setMaxUpdateAgeMillis(0L) // Only fresh locations
         .setGranularity(Granularity.GRANULARITY_FINE)
         .build()
 
     /**
-     * Start GPS with high precision tracking
+     * Start GPS with high precision tracking + direction tracking
      */
     fun startLocationTracking() {
         acquireWakeLock()
         addGpsStatusListener()
         setupRecentLocations()
+        carDirectionTracker.reset() // 🆕 Reset direction tracker
 
         LogCollector.addDetailedLog(
             LogCollector.LogCategory.GPS,
-            "🔍 HIGH PRECISION GPS Started",
+            "🔍 HIGH PRECISION GPS + DIRECTION TRACKING Started",
             mapOf(
                 "Wake Lock" to if (isWakeLockAcquired) "✅ Active" else "❌ Failed",
-                "Mode" to "HIGH PRECISION",
-                "High Speed" to "1s updates",
-                "Medium Speed" to "2s updates",
-                "Low Speed" to "3s updates",
-                "Stationary" to "5s updates",
+                "Mode" to "HIGH PRECISION + DIRECTION",
+                "High Speed" to "0.8s updates",
+                "Medium Speed" to "1.5s updates",
+                "Low Speed" to "2.5s updates",
+                "Stationary" to "4s updates",
                 "Kalman Filter" to "ENABLED",
                 "Multi-GNSS" to "ENABLED",
-                "Speed Detection" to "✅ Enhanced"
+                "Speed Detection" to "✅ Enhanced",
+                "Direction Tracking" to "✅ ENABLED"
             )
         )
     }
@@ -165,16 +318,19 @@ class GPSLocationManager(private val context: Context) {
      */
     fun stopLocationTracking() {
         releaseWakeLock()
+        carDirectionTracker.reset() // 🆕 Reset direction tracker
+
         LogCollector.addDetailedLog(
             LogCollector.LogCategory.GPS,
-            "⏹️ High Precision GPS Stopped",
+            "⏹️ High Precision GPS + Direction Tracking Stopped",
             mapOf(
                 "Total Updates" to locationUpdateCount.toString(),
                 "Average Accuracy" to "${String.format("%.1f", averageAccuracy)}m",
                 "Best Accuracy" to "${String.format("%.1f", bestAccuracy)}m",
                 "Max Speed" to "${String.format("%.1f", currentSpeed)} km/h",
                 "Speed Issues" to "$consecutiveNoSpeedCount times",
-                "Satellites" to "$satellitesUsedInFix/$currentSatelliteCount"
+                "Satellites" to "$satellitesUsedInFix/$currentSatelliteCount",
+                "Direction Status" to carDirectionTracker.getStatus()["Status"]!!
             )
         )
         locationUpdateCount = 0
@@ -264,14 +420,15 @@ class GPSLocationManager(private val context: Context) {
                                     "satellites_used" to "$usedInFix/$currentSatelliteCount",
                                     "GPS" to if (gpsCount > 0) "$gpsCount (${String.format("%.1f", gpsSignalStrength)} dB)" else "0",
                                     "GLONASS" to if (glonassCount > 0) "$glonassCount (${String.format("%.1f", glonassSignalStrength)} dB)" else "0",
-                                    "HDOP" to String.format("%.1f", currentHdop)
+                                    "HDOP" to String.format("%.1f", currentHdop),
+                                    "Direction_Status" to carDirectionTracker.getStatus()["Status"]!!
                                 )
                             )
 
                             if (usedInFix < 4) {
                                 LogCollector.addDetailedLog(
                                     LogCollector.LogCategory.GPS,
-                                    "⚠️ Poor GPS signal: $usedInFix/$currentSatelliteCount - May affect precision"
+                                    "⚠️ Poor GPS signal: $usedInFix/$currentSatelliteCount - May affect precision and direction"
                                 )
                             }
                         }
@@ -280,7 +437,7 @@ class GPSLocationManager(private val context: Context) {
                             // Time to first fix - important metric
                             LogCollector.addDetailedLog(
                                 LogCollector.LogCategory.GPS,
-                                "⚡ First GPS fix obtained in ${ttffMillis}ms"
+                                "⚡ First GPS fix obtained in ${ttffMillis}ms - Direction tracking ready"
                             )
                         }
                     }, null)
@@ -299,7 +456,7 @@ class GPSLocationManager(private val context: Context) {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "MSLDApp:HighPrecisionGPS"
+                "MSLDApp:HighPrecisionGPS+Direction"
             )
 
             // Keep app awake for 12 hours max
@@ -308,7 +465,7 @@ class GPSLocationManager(private val context: Context) {
 
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.BACKEND,
-                "🔋 High Precision Wake Lock Acquired (12h max)"
+                "🔋 High Precision + Direction Wake Lock Acquired (12h max)"
             )
         } catch (e: Exception) {
             LogCollector.logError("❌ Failed to acquire wake lock", e)
@@ -370,7 +527,7 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * High precision current location with Kalman filtering
+     * High precision current location with Kalman filtering + direction
      */
     suspend fun getCurrentLocation(): LocationData? {
         if (!hasLocationPermission()) {
@@ -381,7 +538,7 @@ class GPSLocationManager(private val context: Context) {
         return try {
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.GPS,
-                "🔍 High precision location request (10s timeout)"
+                "🔍 High precision + direction location request (10s timeout)"
             )
 
             val location = withTimeoutOrNull(10000L) { // 10 seconds
@@ -391,7 +548,7 @@ class GPSLocationManager(private val context: Context) {
             if (location != null && location.accuracy <= 30f) {
                 // Apply Kalman filtering for higher precision
                 val filteredLocation = applyKalmanFilter(location)
-                val locationData = createLocationData(filteredLocation)
+                val locationData = createLocationDataWithDirection(filteredLocation)
 
                 // Track best accuracy achieved
                 if (filteredLocation.accuracy < bestAccuracy) {
@@ -400,11 +557,12 @@ class GPSLocationManager(private val context: Context) {
 
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.GPS,
-                    "✅ High precision location acquired",
+                    "✅ High precision + direction location acquired",
                     mapOf(
                         "Raw Accuracy" to "${String.format("%.1f", location.accuracy)}m",
                         "Filtered Accuracy" to "${String.format("%.1f", filteredLocation.accuracy)}m",
                         "Speed" to "${String.format("%.1f", locationData.speedKmh)} km/h",
+                        "Direction" to if (locationData.carDirection != null) "${locationData.carDirection!!.toInt()}°" else "N/A",
                         "Has Speed" to if (location.hasSpeed()) "YES" else "NO",
                         "Satellites" to "$satellitesUsedInFix/$currentSatelliteCount",
                         "HDOP" to "${String.format("%.1f", currentHdop)}",
@@ -420,7 +578,7 @@ class GPSLocationManager(private val context: Context) {
                 null
             }
         } catch (e: Exception) {
-            LogCollector.logError("❌ High precision location request failed", e)
+            LogCollector.logError("❌ High precision + direction location request failed", e)
             null
         }
     }
@@ -445,7 +603,7 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * High precision location updates with Kalman filtering and averaging
+     * High precision location updates with Kalman filtering, averaging + DIRECTION TRACKING
      */
     fun getLocationUpdates(): Flow<LocationData> = callbackFlow {
 
@@ -484,7 +642,8 @@ class GPSLocationManager(private val context: Context) {
                                 filteredLocation
                             }
 
-                            val locationData = createLocationData(bestLocation)
+                            // 🆕 CREATE LOCATION DATA WITH DIRECTION TRACKING
+                            val locationData = createLocationDataWithDirection(bestLocation)
                             val previousSpeed = currentSpeed
                             currentSpeed = locationData.speedKmh
 
@@ -513,18 +672,20 @@ class GPSLocationManager(private val context: Context) {
                                 (averageAccuracy + bestLocation.accuracy) / 2f
                             }
 
-                            // More frequent logging for debugging
-                            val shouldLog = locationUpdateCount % 2 == 0 ||
+                            // More frequent logging for debugging - include direction
+                            val shouldLog = locationUpdateCount % 3 == 0 ||
                                     Math.abs(currentSpeed - previousSpeed) > 5f ||
                                     consecutiveNoSpeedCount > 3 ||
-                                    bestLocation.accuracy <= 5f // Log very precise locations
+                                    bestLocation.accuracy <= 5f || // Log very precise locations
+                                    locationData.carDirection != null // Log when direction is available
 
                             if (shouldLog) {
                                 LogCollector.addDetailedLog(
                                     LogCollector.LogCategory.GPS,
-                                    "🔍 High Precision GPS Update #$locationUpdateCount",
+                                    "🔍 High Precision + Direction GPS Update #$locationUpdateCount",
                                     mapOf(
                                         "Speed" to "${String.format("%.1f", locationData.speedKmh)} km/h",
+                                        "Direction" to if (locationData.carDirection != null) "${locationData.carDirection!!.toInt()}°" else "Calculating...",
                                         "Raw Accuracy" to "${String.format("%.1f", location.accuracy)}m",
                                         "Final Accuracy" to "${String.format("%.1f", bestLocation.accuracy)}m",
                                         "Method" to if (bestLocation === averagedLocation) "AVERAGED" else "KALMAN",
@@ -537,7 +698,7 @@ class GPSLocationManager(private val context: Context) {
                                 )
                             }
 
-                            // Dynamic interval adjustment - more responsive
+                            // Dynamic interval adjustment - more responsive for direction tracking
                             val speedDiff = Math.abs(currentSpeed - previousSpeed)
                             if (speedDiff > 10f || locationUpdateCount % 10 == 0) {
                                 try {
@@ -556,15 +717,15 @@ class GPSLocationManager(private val context: Context) {
                                         )
 
                                         val interval = when {
-                                            currentSpeed > 60f -> "1s"
-                                            currentSpeed > 20f -> "2s"
-                                            currentSpeed > 5f -> "3s"
-                                            else -> "5s" // Faster than original
+                                            currentSpeed > 60f -> "0.8s"
+                                            currentSpeed > 20f -> "1.5s"
+                                            currentSpeed > 5f -> "2.5s"
+                                            else -> "4s"
                                         }
 
                                         LogCollector.addDetailedLog(
                                             LogCollector.LogCategory.GPS,
-                                            "⚡ GPS interval adjusted: $interval (Speed: ${String.format("%.1f", currentSpeed)} km/h)"
+                                            "⚡ GPS + Direction interval adjusted: $interval (Speed: ${String.format("%.1f", currentSpeed)} km/h)"
                                         )
                                     }
                                 } catch (e: Exception) {
@@ -585,7 +746,7 @@ class GPSLocationManager(private val context: Context) {
                 if (!availability.isLocationAvailable) {
                     LogCollector.addDetailedLog(
                         LogCollector.LogCategory.GPS,
-                        "❌ GPS signal lost - This may cause TTL sending issues"
+                        "❌ GPS signal lost - This may cause TTL sending issues and direction tracking problems"
                     )
                 }
             }
@@ -594,15 +755,16 @@ class GPSLocationManager(private val context: Context) {
         try {
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.GPS,
-                "🔍 High Precision GPS Tracking Started",
+                "🔍 High Precision GPS + Direction Tracking Started",
                 mapOf(
-                    "High Speed Interval" to "1 second",
-                    "Medium Speed Interval" to "2 seconds",
-                    "Low Speed Interval" to "3 seconds",
-                    "Stationary Interval" to "5 seconds",
+                    "High Speed Interval" to "0.8 seconds",
+                    "Medium Speed Interval" to "1.5 seconds",
+                    "Low Speed Interval" to "2.5 seconds",
+                    "Stationary Interval" to "4 seconds",
                     "Kalman Filter" to "ENABLED",
                     "Location Averaging" to "ENABLED",
                     "Speed Detection" to "✅ Enhanced",
+                    "Direction Tracking" to "✅ ENABLED",
                     "TTL Reliability" to "✅ Improved"
                 )
             )
@@ -637,12 +799,13 @@ class GPSLocationManager(private val context: Context) {
         awaitClose {
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.GPS,
-                "⏹️ High Precision GPS Stopped",
+                "⏹️ High Precision GPS + Direction Stopped",
                 mapOf(
                     "Total Updates" to locationUpdateCount.toString(),
                     "Best Accuracy" to "${String.format("%.1f", bestAccuracy)}m",
                     "Speed Issues" to "$consecutiveNoSpeedCount",
-                    "Max Speed Reached" to "${String.format("%.1f", currentSpeed)} km/h"
+                    "Max Speed Reached" to "${String.format("%.1f", currentSpeed)} km/h",
+                    "Direction Tracker" to carDirectionTracker.getStatus()["Status"]!!
                 )
             )
             try {
@@ -653,7 +816,7 @@ class GPSLocationManager(private val context: Context) {
             }
         }
     }.distinctUntilChanged { old, new ->
-        // Less aggressive filtering for higher precision
+        // Less aggressive filtering for higher precision and direction accuracy
         try {
             val distance = FloatArray(1)
             Location.distanceBetween(
@@ -665,12 +828,22 @@ class GPSLocationManager(private val context: Context) {
             val timeDiff = new.timestamp - old.timestamp
             val speedDiff = Math.abs(new.speedKmh - old.speedKmh)
 
+            // 🆕 Consider direction changes for filtering
+            val directionChanged = if (old.carDirection != null && new.carDirection != null) {
+                val directionDiff = abs(old.carDirection!! - new.carDirection!!)
+                val minDiff = min(directionDiff, 360 - directionDiff)
+                minDiff > 10f // Direction changed by more than 10 degrees
+            } else {
+                old.carDirection != new.carDirection // Direction availability changed
+            }
+
             // More sensitive filters - less filtering to ensure all significant updates come through
             val shouldSkip = when {
                 speedDiff > 3f -> false // Don't skip if speed changed
-                new.speedKmh > 50f -> distance[0] < 1f && timeDiff < 500   // Highway: 1m/500ms (more sensitive)
-                new.speedKmh > 20f -> distance[0] < 0.5f && timeDiff < 1000  // City: 0.5m/1s (more sensitive)
-                else -> distance[0] < 0.3f && timeDiff < 2000              // Slow: 0.3m/2s (more sensitive)
+                directionChanged -> false // 🆕 Don't skip if direction changed
+                new.speedKmh > 50f -> distance[0] < 2f && timeDiff < 800   // Highway: 2m/0.8s (for direction)
+                new.speedKmh > 20f -> distance[0] < 1f && timeDiff < 1500  // City: 1m/1.5s (for direction)
+                else -> distance[0] < 0.5f && timeDiff < 2500             // Slow: 0.5m/2.5s (for direction)
             }
 
             shouldSkip
@@ -785,8 +958,6 @@ class GPSLocationManager(private val context: Context) {
 
         // Set accuracy as average of input locations, but slightly better
         // due to the averaging effect
-        // Set accuracy as average of input locations, but slightly better
-        // due to the averaging effect
         avgLocation.accuracy = (totalAccuracy / sortedLocations.size) * 0.8f
 
         // Set time to now
@@ -816,8 +987,8 @@ class GPSLocationManager(private val context: Context) {
         val locationAge = currentTime - location.time
 
         return when {
-            locationAge > 10000 -> false // 10 seconds max age (stricter than original)
-            location.accuracy > 50f -> false // 50m max accuracy (same as original)
+            locationAge > 10000 -> false // 10 seconds max age
+            location.accuracy > 50f -> false // 50m max accuracy
             location.latitude == 0.0 && location.longitude == 0.0 -> false
             location.latitude < -90 || location.latitude > 90 -> false
             location.longitude < -180 || location.longitude > 180 -> false
@@ -826,25 +997,12 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * Create LocationData with enhanced information
-     * This preserves your original LocationData structure
+     * 🆕 Create LocationData with enhanced information + DIRECTION TRACKING
+     * This preserves your original LocationData structure and adds direction
      */
-    private fun createLocationData(location: Location): LocationData {
-        // Enhance logging with satellite info when accuracy is good
-        if (location.accuracy <= 10f) {
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.GPS,
-                "🎯 High Precision Data",
-                mapOf(
-                    "Accuracy" to "${String.format("%.1f", location.accuracy)}m",
-                    "Satellites" to "$satellitesUsedInFix/$currentSatelliteCount",
-                    "HDOP" to "${String.format("%.1f", currentHdop)}",
-                    "Fix Quality" to getFixQualityText()
-                )
-            )
-        }
-
-        return LocationData(
+    private fun createLocationDataWithDirection(location: Location): LocationData {
+        // Create basic location data first
+        val locationData = LocationData(
             latitude = location.latitude,
             longitude = location.longitude,
             accuracy = location.accuracy,
@@ -855,6 +1013,40 @@ class GPSLocationManager(private val context: Context) {
             timestamp = location.time,
             provider = location.provider ?: "Unknown"
         )
+
+        // 🆕 UPDATE CAR DIRECTION TRACKER AND GET DIRECTION
+        val carDirection = carDirectionTracker.updateLocation(locationData)
+
+        // Return enhanced location data with direction
+        val enhancedLocationData = LocationData(
+            latitude = locationData.latitude,
+            longitude = locationData.longitude,
+            accuracy = locationData.accuracy,
+            speed = locationData.speed,
+            speedKmh = locationData.speedKmh,
+            altitude = locationData.altitude,
+            bearing = locationData.bearing,
+            timestamp = locationData.timestamp,
+            provider = locationData.provider,
+            carDirection = carDirection  // 🆕 Car direction from GPS track
+        )
+
+        // Enhance logging with satellite info and direction when accuracy is good
+        if (location.accuracy <= 10f) {
+            LogCollector.addDetailedLog(
+                LogCollector.LogCategory.GPS,
+                "🎯 High Precision + Direction Data",
+                mapOf(
+                    "Accuracy" to "${String.format("%.1f", location.accuracy)}m",
+                    "Direction" to if (carDirection != null) "${carDirection.toInt()}°" else "Calculating...",
+                    "Satellites" to "$satellitesUsedInFix/$currentSatelliteCount",
+                    "HDOP" to "${String.format("%.1f", currentHdop)}",
+                    "Fix Quality" to getFixQualityText()
+                )
+            )
+        }
+
+        return enhancedLocationData
     }
 
     /**
@@ -872,7 +1064,7 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * Get last known location with validation
+     * Get last known location with validation + direction
      */
     suspend fun getLastKnownLocation(): LocationData? {
         if (!hasLocationPermission()) {
@@ -894,7 +1086,7 @@ class GPSLocationManager(private val context: Context) {
             if (location != null && isLocationValidReliable(location)) {
                 // Apply Kalman filtering for better precision, even with last known
                 val filteredLocation = applyKalmanFilter(location)
-                createLocationData(filteredLocation)
+                createLocationDataWithDirection(filteredLocation)
             } else {
                 null
             }
@@ -935,7 +1127,7 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * Safe method to request a single location with high precision
+     * Safe method to request a single location with high precision + direction
      */
     suspend fun requestSingleLocation(): LocationData? {
         return try {
@@ -956,6 +1148,7 @@ class GPSLocationManager(private val context: Context) {
                     "⚠️ Using last known location as fallback",
                     mapOf(
                         "Accuracy" to "${String.format("%.1f", lastKnown.accuracy)}m",
+                        "Direction" to if (lastKnown.carDirection != null) "${lastKnown.carDirection!!.toInt()}°" else "N/A",
                         "Age" to "${(System.currentTimeMillis() - lastKnown.timestamp) / 1000}s"
                     )
                 )
@@ -981,14 +1174,21 @@ class GPSLocationManager(private val context: Context) {
     fun isWakeLockActive(): Boolean = isWakeLockAcquired
 
     /**
-     * Enhanced performance stats with satellite metrics
+     * 🆕 Get car direction tracker status
+     */
+    fun getCarDirectionStatus(): Map<String, String> {
+        return carDirectionTracker.getStatus()
+    }
+
+    /**
+     * Enhanced performance stats with satellite metrics + direction
      */
     fun getPerformanceStats(): Map<String, String> {
         val mode = when {
-            currentSpeed > 60f -> "HIGH SPEED (1s)"
-            currentSpeed > 20f -> "MEDIUM SPEED (2s)"
-            currentSpeed > 5f -> "LOW SPEED (3s)"
-            else -> "STATIONARY (5s)"
+            currentSpeed > 60f -> "HIGH SPEED (0.8s)"
+            currentSpeed > 20f -> "MEDIUM SPEED (1.5s)"
+            currentSpeed > 5f -> "LOW SPEED (2.5s)"
+            else -> "STATIONARY (4s)"
         }
 
         val precisionMode = when {
@@ -998,9 +1198,14 @@ class GPSLocationManager(private val context: Context) {
             else -> "STANDARD"
         }
 
+        val directionStatus = carDirectionTracker.getStatus()
+
         return mapOf(
             "Location Updates" to locationUpdateCount.toString(),
             "Current Speed" to "${String.format("%.1f", currentSpeed)} km/h",
+            "Current Direction" to (directionStatus["Current Direction"] ?: "N/A"),
+            "Direction Status" to (directionStatus["Status"] ?: "N/A"),
+            "Direction Confidence" to (directionStatus["Confidence"] ?: "N/A"),
             "Average Accuracy" to if (averageAccuracy > 0) "${String.format("%.1f", averageAccuracy)}m" else "N/A",
             "Best Accuracy" to if (bestAccuracy != Float.MAX_VALUE) "${String.format("%.1f", bestAccuracy)}m" else "N/A",
             "Current Mode" to mode,
@@ -1015,7 +1220,7 @@ class GPSLocationManager(private val context: Context) {
     }
 
     /**
-     * Get satellite status text for UI display
+     * Get satellite status text for UI display + direction
      */
     fun getSatelliteStatusText(): String {
         val constellations = mutableListOf<String>()
@@ -1030,8 +1235,9 @@ class GPSLocationManager(private val context: Context) {
         }
 
         val qualityText = getFixQualityText()
+        val directionText = carDirectionTracker.getCurrentDirection()?.let { "${it.toInt()}°" } ?: "N/A"
 
-        return "$qualityText ($satellitesUsedInFix/$currentSatelliteCount) - $constellationText"
+        return "$qualityText ($satellitesUsedInFix/$currentSatelliteCount) - $constellationText - Dir:$directionText"
     }
 
     /**
@@ -1098,6 +1304,11 @@ class GPSLocationManager(private val context: Context) {
                 kalmanQ = 0.008
                 kalmanVariance = 25.0
             }
+            PrecisionMode.DIRECTION_OPTIMIZED -> {
+                // 🆕 Optimized for direction tracking
+                kalmanQ = 0.007
+                kalmanVariance = 25.0
+            }
         }
 
         LogCollector.addDetailedLog(
@@ -1114,22 +1325,24 @@ class GPSLocationManager(private val context: Context) {
      * Precision modes for Kalman filter tuning
      */
     enum class PrecisionMode {
-        HIGH_PRECISION,  // More responsive, less smoothing
-        SMOOTH_TRACKING, // More smoothing, less responsive
-        BALANCED         // Default balanced approach
+        HIGH_PRECISION,      // More responsive, less smoothing
+        SMOOTH_TRACKING,     // More smoothing, less responsive
+        BALANCED,            // Default balanced approach
+        DIRECTION_OPTIMIZED  // 🆕 Optimized for direction tracking
     }
 
     /**
-     * Reset Kalman filter to start fresh
+     * Reset Kalman filter and direction tracker to start fresh
      */
     fun resetKalmanFilter() {
         kalmanLat = 0.0
         kalmanLon = 0.0
         kalmanVariance = 30.0
+        carDirectionTracker.reset() // 🆕 Also reset direction tracker
 
         LogCollector.addDetailedLog(
             LogCollector.LogCategory.GPS,
-            "🧹 Kalman filter reset"
+            "🧹 Kalman filter + direction tracker reset"
         )
     }
 }

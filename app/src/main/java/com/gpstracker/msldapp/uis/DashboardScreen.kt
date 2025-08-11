@@ -1,4 +1,4 @@
-// COMPLETE HIGHWAY CLASSIFICATION DASHBOARD
+// COMPLETE HIGHWAY CLASSIFICATION DASHBOARD WITH ALL BUG FIXES
 // File: app/src/main/java/com/gpstracker/msldapp/uis/DashboardScreen.kt
 
 package com.gpstracker.msldapp.uis
@@ -50,7 +50,7 @@ fun DashboardScreen() {
     var lastTtlSendTime by remember { mutableStateOf(0L) }
     var lastSentSpeedLimit by remember { mutableStateOf<Int?>(null) }
 
-    // OSM Speed Lookup
+    // OSM Speed Lookup with Multi-Factor Selection
     val speedLookup = remember {
         try {
             OsmJsonSpeedLookup(context)
@@ -60,7 +60,7 @@ fun DashboardScreen() {
         }
     }
 
-    // 🛣️ Complete Highway Classification Manager
+    // 🛣️ Complete Highway Classification Manager with Speed Jump Detection
     val stableManager = remember { StableSpeedLimitManager() }
 
     val gpsManager = remember {
@@ -85,6 +85,14 @@ fun DashboardScreen() {
     var currentAltitude by remember { mutableStateOf(0.0) }
     var speedRoadRelation by remember { mutableStateOf("") }
     var enforcementStatus by remember { mutableStateOf("") }
+
+    // 🆕 Direction Tracking States
+    var currentCarDirection by remember { mutableStateOf<Float?>(null) }
+    var directionTrackingStatus by remember { mutableStateOf("Acquiring...") }
+
+    // 🆕 Speed Jump Detection States
+    var isSpeedJumpVerifying by remember { mutableStateOf(false) }
+    var speedJumpInfo by remember { mutableStateOf("") }
 
     // Connection health monitoring
     var consecutiveFailures by remember { mutableStateOf(0) }
@@ -213,8 +221,6 @@ fun DashboardScreen() {
         }
     }
 
-    // Fixed TTL sending method with proper return handling
-
     // TTL sending with retry logic
     suspend fun sendTtlWithRetry(speedLimitToSend: Int, reason: String): Boolean {
         var attempts = 0
@@ -269,15 +275,23 @@ fun DashboardScreen() {
 
         return sendSuccess
     }
-    // 🛣️ OSM lookup with highway classification
-    suspend fun lookupSpeedLimitWithRetry(lat: Double, lon: Double, speed: Float): Pair<SpeedLimitResult?, Map<String, String>> {
+
+    // 🆕 Enhanced OSM lookup with direction and altitude
+    suspend fun lookupSpeedLimitWithRetry(
+        lat: Double,
+        lon: Double,
+        speed: Float,
+        carDirection: Float? = null,     // 🆕 Car direction parameter
+        altitude: Double? = null         // 🆕 Altitude parameter
+    ): Pair<SpeedLimitResult?, Map<String, String>> {
         var attempts = 0
         var result: SpeedLimitResult? = null
         var osmTags = emptyMap<String, String>()
 
         while (attempts < 3 && result == null) {
             try {
-                result = speedLookup?.findSpeedLimit(lat, lon, speed)
+                // 🆕 Call enhanced findSpeedLimit with direction and altitude
+                result = speedLookup?.findSpeedLimit(lat, lon, speed, carDirection, altitude)
                 if (result != null) {
                     // 🛣️ Extract OSM tags for highway classification
                     osmTags = speedLookup?.getLastOsmTags() ?: emptyMap()
@@ -287,13 +301,13 @@ fun DashboardScreen() {
                     if (attempts > 0) {
                         LogCollector.addDetailedLog(
                             LogCollector.LogCategory.OSM,
-                            "✅ OSM lookup succeeded on attempt ${attempts + 1}"
+                            "✅ Multi-factor OSM lookup succeeded on attempt ${attempts + 1}"
                         )
                     }
                     return Pair(result, osmTags)
                 }
             } catch (e: Exception) {
-                LogCollector.logError("❌ OSM lookup attempt ${attempts + 1} failed", e)
+                LogCollector.logError("❌ Multi-factor OSM lookup attempt ${attempts + 1} failed", e)
             }
 
             attempts++
@@ -306,14 +320,14 @@ fun DashboardScreen() {
         if (consecutiveFailures > 5) {
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.OSM,
-                "⚠️ Multiple OSM lookup failures ($consecutiveFailures) - possible connection issue"
+                "⚠️ Multiple multi-factor OSM lookup failures ($consecutiveFailures) - possible connection issue"
             )
         }
 
         return Pair(null, emptyMap())
     }
 
-    // 🛣️ GPS TRACKING WITH COMPLETE HIGHWAY CLASSIFICATION
+    // 🛣️ GPS TRACKING WITH COMPLETE HIGHWAY CLASSIFICATION + DIRECTION + SPEED JUMP DETECTION
     LaunchedEffect(isGpsTracking) {
         if (isGpsTracking && gpsManager?.hasLocationPermission() == true) {
 
@@ -323,13 +337,24 @@ fun DashboardScreen() {
                 showBatteryOptimizationDialog = true
             }
 
-            LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "🛣️ GPS tracking with highway classification started")
+            LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "🛣️ GPS tracking with complete highway classification + direction + speed jump detection started")
 
             try {
                 gpsManager.getLocationUpdates().collect { location ->
                     try {
                         currentLocation = location
                         currentAltitude = location.altitude
+                        currentCarDirection = location.carDirection  // 🆕 Update car direction
+
+                        // 🆕 Update direction tracking status
+                        directionTrackingStatus = if (location.carDirection != null) {
+                            "Tracking: ${location.carDirection!!.toInt()}°"
+                        } else {
+                            when {
+                                location.speedKmh > 10f -> "Calculating..."
+                                else -> "Too slow for direction"
+                            }
+                        }
 
                         val currentRegion = when {
                             location.latitude in 24.7..25.5 && location.longitude in 54.8..55.7 -> "Dubai/Sharjah"
@@ -342,7 +367,7 @@ fun DashboardScreen() {
                         if (currentRegion != lastRegion) {
                             LogCollector.addDetailedLog(
                                 LogCollector.LogCategory.GPS,
-                                "📍 Region: $currentRegion (${String.format("%.1f", location.speedKmh)} km/h, Alt: ${String.format("%.1f", location.altitude)}m)"
+                                "📍 Region: $currentRegion (${String.format("%.1f", location.speedKmh)} km/h, Dir: ${if (location.carDirection != null) "${location.carDirection!!.toInt()}°" else "N/A"}, Alt: ${String.format("%.1f", location.altitude)}m)"
                             )
                             lastRegion = currentRegion
                         }
@@ -355,20 +380,22 @@ fun DashboardScreen() {
                             if (shouldLog) {
                                 LogCollector.addDetailedLog(
                                     LogCollector.LogCategory.OSM,
-                                    "🗺️ Highway lookup: ${String.format("%.1f", location.speedKmh)} km/h (Alt: ${String.format("%.1f", location.altitude)}m)"
+                                    "🗺️ Multi-factor highway lookup: ${String.format("%.1f", location.speedKmh)} km/h (Dir: ${if (location.carDirection != null) "${location.carDirection!!.toInt()}°" else "N/A"}, Alt: ${String.format("%.1f", location.altitude)}m)"
                                 )
                             }
 
                             scope.launch {
                                 try {
-                                    // 🛣️ Get raw OSM data with highway tags
+                                    // 🆕 Enhanced OSM data lookup with direction and altitude
                                     val (rawSpeedInfo, osmTags) = lookupSpeedLimitWithRetry(
                                         location.latitude,
                                         location.longitude,
-                                        location.speedKmh
+                                        location.speedKmh,
+                                        location.carDirection,  // 🆕 Pass car direction
+                                        location.altitude       // 🆕 Pass altitude
                                     )
 
-                                    // 🛣️ Use complete highway classification manager
+                                    // 🛣️ Use complete highway classification manager with speed jump detection
                                     val stableResult = stableManager.getStableSpeedLimit(
                                         location.latitude,
                                         location.longitude,
@@ -378,14 +405,63 @@ fun DashboardScreen() {
                                         osmTags  // 🆕 OSM TAGS FOR HIGHWAY CLASSIFICATION
                                     )
 
-                                    // 🛣️ HANDLE ALL STATES WITH HIGHWAY CLASSIFICATION
+                                    // 🆕 Handle SPEED JUMP VERIFICATION states
                                     when (stableResult) {
+                                        // 🆕 NEW: Handle Speed Jump Verification
+                                        is StableSpeedResult.SpeedJumpVerification -> {
+                                            val currentLimit = stableResult.currentSpeedLimit
+                                            val pendingLimit = stableResult.newSpeedLimit
+                                            val shouldSendTtl = stableResult.sendToTtl
+                                            val highwayInfo = stableResult.highwayInfo
+                                            val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = true
+                                            speedJumpInfo = "🚨 SPEED JUMP: ${currentLimit}→${pendingLimit}km/h (${stableResult.jumpSize}km/h jump, ${stableResult.verificationCount}/${stableResult.requiredVerifications} checks)"
+
+                                            currentHighwayInfo = highwayInfo
+                                            currentAltitude = altitude
+
+                                            speedRoadRelation = if (highwayInfo != null) {
+                                                "${highwayInfo.icon} ${highwayInfo.type} → VERIFYING ${currentLimit}km/h→${pendingLimit}km/h (Jump: ${stableResult.jumpSize}km/h)"
+                                            } else {
+                                                "Unknown road → VERIFYING ${currentLimit}km/h→${pendingLimit}km/h"
+                                            }
+
+                                            enforcementStatus = "🚨 SPEED JUMP VERIFICATION: ${stableResult.jumpSize}km/h change needs ${stableResult.requiredVerifications} checks (${stableResult.nextCheckIn}s)"
+
+                                            currentSpeedLimit = SpeedLimitResult(
+                                                speedLimit = currentLimit,
+                                                roadName = "${highwayInfo?.description ?: "Unknown Road"} - 🚨 Speed Jump Verification (${stableResult.verificationCount}/${stableResult.requiredVerifications}) ${if (shouldSendTtl) "📤 TTL SENT" else "🔄 TTL WAIT"}",
+                                                roadType = "speed_jump_verification",
+                                                confidence = 0.9f,
+                                                source = "speed_jump_detection",
+                                                distance = 0.0
+                                            )
+
+                                            LogCollector.addDetailedLog(
+                                                LogCollector.LogCategory.OSM,
+                                                "🚨 SPEED JUMP VERIFICATION: ${currentLimit}km/h→${pendingLimit}km/h on ${highwayInfo?.description ?: "Unknown"} (${stableResult.jumpSize}km/h jump) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
+                                            )
+
+                                            if (shouldSendTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
+                                                val speedLimitToSend = if (currentLimit > 140) 140 else currentLimit
+                                                val success = sendTtlWithRetry(speedLimitToSend, "speed_jump_verification")
+                                                if (success) {
+                                                    lastTtlSendTime = System.currentTimeMillis()
+                                                    lastSentSpeedLimit = speedLimitToSend
+                                                }
+                                            }
+                                        }
+
                                         // 🛣️ STABLE/CONFIRMED - WITH HIGHWAY INFO
                                         is StableSpeedResult.Confirmed -> {
                                             val limitValue = stableResult.speedLimit
                                             val shouldSendTtl = stableResult.sendToTtl
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -410,18 +486,18 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} (${stableResult.timeSinceConfirmed/1000}s) ${if (shouldSendTtl) "📤 TTL SENT" else "🔄 TTL WAIT"}",
                                                 roadType = "confirmed",
                                                 confidence = 0.9f,
-                                                source = "stable_highway",
+                                                source = "stable_highway_with_direction",
                                                 distance = 0.0
                                             )
 
                                             LogCollector.addDetailedLog(
                                                 LogCollector.LogCategory.OSM,
-                                                "🔒 STABLE: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Alt: ${String.format("%.1f", altitude)}m) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
+                                                "🔒 STABLE: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Dir: ${if (location.carDirection != null) "${location.carDirection!!.toInt()}°" else "N/A"}, Alt: ${String.format("%.1f", altitude)}m) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
                                             )
 
                                             if (shouldSendTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (limitValue > 140) 140 else limitValue
-                                                val success = sendTtlWithRetry(speedLimitToSend, "stable_highway")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "stable_highway_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -434,6 +510,9 @@ fun DashboardScreen() {
                                             val limitValue = stableResult.speedLimit
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -456,18 +535,18 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} - New Road Confirmed (${stableResult.votesUsed} votes) 📤 TTL SENT",
                                                 roadType = "new_confirmed",
                                                 confidence = 0.95f,
-                                                source = "voting_highway_winner",
+                                                source = "voting_highway_winner_with_direction",
                                                 distance = 0.0
                                             )
 
                                             LogCollector.addDetailedLog(
                                                 LogCollector.LogCategory.OSM,
-                                                "🆕 NEW ROAD: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Alt: ${String.format("%.1f", altitude)}m) - TTL: SEND"
+                                                "🆕 NEW ROAD: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Dir: ${if (location.carDirection != null) "${location.carDirection!!.toInt()}°" else "N/A"}, Alt: ${String.format("%.1f", altitude)}m) - TTL: SEND"
                                             )
 
                                             if (stableResult.sendToTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (limitValue > 140) 140 else limitValue
-                                                val success = sendTtlWithRetry(speedLimitToSend, "new_highway_confirmed")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "new_highway_confirmed_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -481,6 +560,9 @@ fun DashboardScreen() {
                                             val shouldSendTtl = stableResult.sendToTtl
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -496,18 +578,18 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} - Voting... ${stableResult.progress} ${if (shouldSendTtl) "📤 TTL SENT" else "🔄 TTL WAIT"}",
                                                 roadType = "voting",
                                                 confidence = 0.5f,
-                                                source = "voting_highway_progress",
+                                                source = "voting_highway_progress_with_direction",
                                                 distance = 0.0
                                             )
 
                                             LogCollector.addDetailedLog(
                                                 LogCollector.LogCategory.OSM,
-                                                "🗳️ VOTING: ${stableResult.progress}, leading: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
+                                                "🗳️ VOTING: ${stableResult.progress}, leading: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Dir: ${if (location.carDirection != null) "${location.carDirection!!.toInt()}°" else "N/A"}) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
                                             )
 
                                             if (shouldSendTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (limitValue > 140) 140 else limitValue
-                                                val success = sendTtlWithRetry(speedLimitToSend, "voting_highway_continuous")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "voting_highway_continuous_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -515,12 +597,15 @@ fun DashboardScreen() {
                                             }
                                         }
 
-                                        // 🛣️ LAST KNOWN - WITH HIGHWAY INFO
+                                        // Handle other existing result types...
                                         is StableSpeedResult.UsingLastKnown -> {
                                             val limitValue = stableResult.speedLimit
                                             val shouldSendTtl = stableResult.sendToTtl
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -543,18 +628,13 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} - Last Known (${stableResult.timeSinceLastKnown/1000}s ago, #${stableResult.noDataCount}) ${if (shouldSendTtl) "📤 TTL SENT" else "🔄 TTL WAIT"}",
                                                 roadType = "last_known",
                                                 confidence = if (shouldSendTtl) 0.8f else 0.6f,
-                                                source = "last_known_highway_${stableResult.ttlReason}",
+                                                source = "last_known_highway_with_direction_${stableResult.ttlReason}",
                                                 distance = 0.0
-                                            )
-
-                                            LogCollector.addDetailedLog(
-                                                LogCollector.LogCategory.OSM,
-                                                "🔄 LAST KNOWN: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Alt: ${String.format("%.1f", altitude)}m) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
                                             )
 
                                             if (shouldSendTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (limitValue > 140) 140 else limitValue
-                                                val success = sendTtlWithRetry(speedLimitToSend, "last_known_highway")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "last_known_highway_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -562,13 +642,15 @@ fun DashboardScreen() {
                                             }
                                         }
 
-                                        // 🛣️ VERIFYING - WITH HIGHWAY INFO
                                         is StableSpeedResult.Verifying -> {
                                             val currentLimit = stableResult.currentSpeedLimit
                                             val pendingLimit = stableResult.newSpeedLimit
                                             val shouldSendTtl = stableResult.sendToTtl
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -586,18 +668,13 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} - Verifying ${pendingLimit}km/h (${stableResult.verificationCount}/${stableResult.requiredVerifications}, $verificationMode) ${if (shouldSendTtl) "📤 TTL SENT" else "🔄 TTL WAIT"}",
                                                 roadType = "verifying",
                                                 confidence = 0.8f,
-                                                source = "highway_verification_smart",
+                                                source = "highway_verification_smart_with_direction",
                                                 distance = 0.0
-                                            )
-
-                                            LogCollector.addDetailedLog(
-                                                LogCollector.LogCategory.OSM,
-                                                "🔍 VERIFYING: Current ${currentLimit}km/h→${pendingLimit}km/h on ${highwayInfo?.description ?: "Unknown"} ($verificationMode) - TTL: ${if (shouldSendTtl) "SEND" else "WAIT"}"
                                             )
 
                                             if (shouldSendTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (currentLimit > 140) 140 else currentLimit
-                                                val success = sendTtlWithRetry(speedLimitToSend, "verification_highway")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "verification_highway_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -605,11 +682,13 @@ fun DashboardScreen() {
                                             }
                                         }
 
-                                        // 🛣️ VERIFICATION COMPLETE - WITH HIGHWAY INFO
                                         is StableSpeedResult.VerificationComplete -> {
                                             val limitValue = stableResult.speedLimit
                                             val highwayInfo = stableResult.highwayInfo
                                             val altitude = stableResult.altitude
+
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
 
                                             currentHighwayInfo = highwayInfo
                                             currentAltitude = altitude
@@ -632,18 +711,13 @@ fun DashboardScreen() {
                                                 roadName = "${highwayInfo?.description ?: "Unknown Road"} - Verified Speed (${stableResult.checksPerformed} checks) 📤 TTL SENT",
                                                 roadType = "verification_complete",
                                                 confidence = 1.0f,
-                                                source = "highway_verification_complete",
+                                                source = "highway_verification_complete_with_direction",
                                                 distance = 0.0
-                                            )
-
-                                            LogCollector.addDetailedLog(
-                                                LogCollector.LogCategory.OSM,
-                                                "✅ VERIFICATION COMPLETE: ${limitValue}km/h on ${highwayInfo?.description ?: "Unknown"} (Alt: ${String.format("%.1f", altitude)}m) - TTL: SEND"
                                             )
 
                                             if (stableResult.sendToTtl && autoSendSpeedLimits && SerialTtlManager.isConnected) {
                                                 val speedLimitToSend = if (limitValue > 140) 140 else limitValue
-                                                val success = sendTtlWithRetry(speedLimitToSend, "verification_highway_complete")
+                                                val success = sendTtlWithRetry(speedLimitToSend, "verification_highway_complete_direction")
                                                 if (success) {
                                                     lastTtlSendTime = System.currentTimeMillis()
                                                     lastSentSpeedLimit = speedLimitToSend
@@ -652,6 +726,8 @@ fun DashboardScreen() {
                                         }
 
                                         is StableSpeedResult.NoData -> {
+                                            isSpeedJumpVerifying = false
+                                            speedJumpInfo = ""
                                             LogCollector.addDetailedLog(
                                                 LogCollector.LogCategory.OSM,
                                                 "🚫 No speed data available and no last known"
@@ -659,27 +735,30 @@ fun DashboardScreen() {
                                         }
                                     }
 
-                                    // Speed warning with highway info
+                                    // Speed warning with highway info and direction
                                     if (stableResult is StableSpeedResult.Confirmed ||
                                         stableResult is StableSpeedResult.NewConfirmed ||
                                         stableResult is StableSpeedResult.UsingLastKnown ||
                                         stableResult is StableSpeedResult.Verifying ||
-                                        stableResult is StableSpeedResult.VerificationComplete) {
+                                        stableResult is StableSpeedResult.VerificationComplete ||
+                                        stableResult is StableSpeedResult.SpeedJumpVerification) {
                                         val limitValue = when (stableResult) {
                                             is StableSpeedResult.Confirmed -> stableResult.speedLimit
                                             is StableSpeedResult.NewConfirmed -> stableResult.speedLimit
                                             is StableSpeedResult.UsingLastKnown -> stableResult.speedLimit
                                             is StableSpeedResult.Verifying -> stableResult.currentSpeedLimit
                                             is StableSpeedResult.VerificationComplete -> stableResult.speedLimit
+                                            is StableSpeedResult.SpeedJumpVerification -> stableResult.currentSpeedLimit
                                             else -> 0
                                         }
 
                                         if (location.speedKmh > limitValue + 10) {
                                             val highwayType = currentHighwayInfo?.type ?: "Road"
+                                            val directionInfo = if (location.carDirection != null) " heading ${location.carDirection!!.toInt()}°" else ""
                                             Handler(Looper.getMainLooper()).post {
                                                 Toast.makeText(
                                                     context,
-                                                    "⚠️ ${String.format("%.0f", location.speedKmh)}>${limitValue}km/h on $highwayType!",
+                                                    "⚠️ ${String.format("%.0f", location.speedKmh)}>${limitValue}km/h on $highwayType$directionInfo!",
                                                     Toast.LENGTH_SHORT
                                                 ).show()
                                             }
@@ -690,6 +769,8 @@ fun DashboardScreen() {
                                     throw e
                                 } catch (e: Exception) {
                                     currentSpeedLimit = null
+                                    isSpeedJumpVerifying = false
+                                    speedJumpInfo = ""
                                     LogCollector.logError("❌ Highway speed lookup error", e)
                                 } finally {
                                     delay(100)
@@ -713,6 +794,10 @@ fun DashboardScreen() {
 
         } else if (!isGpsTracking) {
             gpsManager?.stopLocationTracking()
+            currentCarDirection = null  // 🆕 Reset direction
+            directionTrackingStatus = "Stopped"  // 🆕 Reset direction status
+            isSpeedJumpVerifying = false  // 🆕 Reset speed jump status
+            speedJumpInfo = ""  // 🆕 Reset speed jump info
             LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "⏹️ GPS tracking stopped")
         }
     }
@@ -744,7 +829,7 @@ fun DashboardScreen() {
                 )
 
                 Text(
-                    "MSLD Highway Classification Tracker",
+                    "MSLD Complete Bug Fix System",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -752,7 +837,7 @@ fun DashboardScreen() {
                 )
 
                 Text(
-                    "🛣️ HIGHWAY SYSTEM: Motorway/Trunk/Primary + Bridge/Tunnel/Ground + Smart Verification + 80+ km/h Enforcement",
+                    "🛣️ ALL BUGS FIXED: Speed Jump Detection + Direction Awareness + Multi-Factor Road Selection + Highway Stickiness + Smart Verification",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                     textAlign = TextAlign.Center
@@ -767,9 +852,34 @@ fun DashboardScreen() {
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // GPS STATUS CARD
+            // 🆕 SPEED JUMP DETECTION STATUS CARD
+            if (isSpeedJumpVerifying && speedJumpInfo.isNotEmpty()) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text("🚨 Speed Jump Detection", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color(0xFFC62828))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                speedJumpInfo,
+                                color = Color(0xFFC62828),
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "System is carefully verifying large speed changes to prevent false alerts.",
+                                color = Color(0xFF757575),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+            }
+
+            // GPS STATUS CARD WITH DIRECTION
             item {
-                HighwayClassificationGpsCard(
+                FixedGpsCard(
                     isGpsTracking = isGpsTracking,
                     currentLocation = currentLocation,
                     gpsManager = gpsManager,
@@ -779,6 +889,8 @@ fun DashboardScreen() {
                     stableManager = stableManager,
                     currentHighwayInfo = currentHighwayInfo,
                     currentAltitude = currentAltitude,
+                    currentCarDirection = currentCarDirection,  // 🆕 Car direction
+                    directionTrackingStatus = directionTrackingStatus,  // 🆕 Direction status
                     onToggleTracking = {
                         try {
                             val hasPermission = gpsManager?.hasLocationPermission() ?: false
@@ -796,6 +908,10 @@ fun DashboardScreen() {
                                     currentSpeedLimit = null
                                     currentHighwayInfo = null
                                     currentAltitude = 0.0
+                                    currentCarDirection = null  // 🆕 Reset direction
+                                    directionTrackingStatus = "Stopped"  // 🆕 Reset direction status
+                                    isSpeedJumpVerifying = false  // 🆕 Reset speed jump status
+                                    speedJumpInfo = ""  // 🆕 Reset speed jump info
                                     speedRoadRelation = ""
                                     enforcementStatus = ""
                                     stableManager.clearAll()
@@ -811,6 +927,7 @@ fun DashboardScreen() {
                                 val loc = gpsManager?.requestSingleLocation()
                                 if (loc != null) {
                                     currentLocation = loc
+                                    currentCarDirection = loc.carDirection  // 🆕 Update direction
                                     Toast.makeText(context, "📍 Location updated", Toast.LENGTH_SHORT).show()
                                 } else {
                                     Toast.makeText(context, "⚠️ Could not get location", Toast.LENGTH_SHORT).show()
@@ -823,36 +940,40 @@ fun DashboardScreen() {
                 )
             }
 
-            // 🛣️ HIGHWAY CLASSIFICATION CARD
+            // 🛣️ HIGHWAY CLASSIFICATION CARD WITH DIRECTION
             item {
-                HighwayClassificationCard(
+                FixedHighwayClassificationCard(
                     currentHighwayInfo = currentHighwayInfo,
                     currentAltitude = currentAltitude,
                     speedRoadRelation = speedRoadRelation,
-                    enforcementStatus = enforcementStatus
+                    enforcementStatus = enforcementStatus,
+                    currentCarDirection = currentCarDirection,  // 🆕 Car direction
+                    directionTrackingStatus = directionTrackingStatus  // 🆕 Direction status
                 )
             }
 
-            // SPEED LIMIT CARD
+            // SPEED LIMIT CARD WITH DIRECTION AND JUMP DETECTION
             item {
-                HighwaySpeedCard(
+                FixedHighwaySpeedCard(
                     currentSpeedLimit = currentSpeedLimit,
                     currentLocation = currentLocation,
                     isLookingUpSpeedLimit = isLookingUpSpeedLimit,
                     currentHighwayInfo = currentHighwayInfo,
-                    currentAltitude = currentAltitude
+                    currentAltitude = currentAltitude,
+                    currentCarDirection = currentCarDirection,  // 🆕 Car direction
+                    isSpeedJumpVerifying = isSpeedJumpVerifying  // 🆕 Speed jump status
                 )
             }
 
             // TTL CONTROL CARD
             item {
-                HighwayTtlControlCard(
+                FixedTtlControlCard(
                     autoSendSpeedLimits = autoSendSpeedLimits,
                     onAutoSendToggle = {
                         autoSendSpeedLimits = it
                         LogCollector.addDetailedLog(
                             LogCollector.LogCategory.BACKEND,
-                            "Auto-send: ${if (it) "ON (highway classification + continuous - 20s)" else "OFF"}"
+                            "Auto-send: ${if (it) "ON (complete bug fix system - 20s)" else "OFF"}"
                         )
                     },
                     manualSpeedLimit = manualSpeedLimit,
@@ -867,14 +988,14 @@ fun DashboardScreen() {
                                 val speedInt = manualSpeedLimit.toIntOrNull()
                                 if (speedInt != null && speedInt in 0..255 && SerialTtlManager.isConnected) {
                                     val cappedSpeed = if (speedInt > 140) 140 else speedInt
-                                    val success = sendTtlWithRetry(cappedSpeed, "manual_highway")
+                                    val success = sendTtlWithRetry(cappedSpeed, "manual_fixed_system")
 
                                     if (success) {
                                         manualSpeedLimit = ""
                                         val message = if (speedInt > 140) {
-                                            "✅ Speed $cappedSpeed sent (manual highway, capped from $speedInt)"
+                                            "✅ Speed $cappedSpeed sent (manual fixed system, capped from $speedInt)"
                                         } else {
-                                            "✅ Speed $cappedSpeed sent (manual highway)"
+                                            "✅ Speed $cappedSpeed sent (manual fixed system)"
                                         }
                                         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                                     }
@@ -891,13 +1012,13 @@ fun DashboardScreen() {
                             try {
                                 if (SerialTtlManager.isConnected) {
                                     val cappedValue = if (value > 140) 140 else value
-                                    val success = sendTtlWithRetry(cappedValue, "quick_highway")
+                                    val success = sendTtlWithRetry(cappedValue, "quick_fixed_system")
 
                                     if (success) {
                                         val message = if (value > 140) {
-                                            "✅ Sent: $cappedValue km/h (quick highway, capped from $value km/h)"
+                                            "✅ Sent: $cappedValue km/h (quick fixed system, capped from $value km/h)"
                                         } else {
-                                            "✅ Sent: $cappedValue km/h (quick highway)"
+                                            "✅ Sent: $cappedValue km/h (quick fixed system)"
                                         }
                                         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                                     }
@@ -952,7 +1073,7 @@ fun DashboardScreen() {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("📋 Highway Classification Log", fontWeight = FontWeight.Bold)
+                            Text("📋 Complete Bug Fix System Log", fontWeight = FontWeight.Bold)
 
                             Button(
                                 onClick = {
@@ -970,20 +1091,27 @@ fun DashboardScreen() {
 
                         if (logs.isEmpty()) {
                             Text(
-                                "No highway activity yet...",
+                                "No activity yet...",
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall
                             )
                         } else {
                             logs.take(6).forEach { logLine ->
+                                val isSpeedJumpLog = logLine.contains("SPEED JUMP") || logLine.contains("🚨")
+                                val isDirectionLog = logLine.contains("Direction") || logLine.contains("🧭")
                                 val isHighwayLog = logLine.contains("MOTORWAY") || logLine.contains("TRUNK") || logLine.contains("PRIMARY") || logLine.contains("BRIDGE") || logLine.contains("TUNNEL")
                                 val isTtlLog = logLine.contains("TTL") || logLine.contains("📤")
+                                val isMultiFactorLog = logLine.contains("Multi-factor") || logLine.contains("MULTI-FACTOR")
+
                                 Text(
                                     text = logLine,
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier.padding(vertical = 1.dp),
                                     fontSize = 11.sp,
                                     color = when {
+                                        isSpeedJumpLog -> Color(0xFFE91E63) // Pink for speed jump
+                                        isDirectionLog -> Color(0xFF9C27B0) // Purple for direction
+                                        isMultiFactorLog -> Color(0xFF673AB7) // Deep purple for multi-factor
                                         isHighwayLog -> Color(0xFF2196F3) // Blue for highway
                                         isTtlLog -> Color(0xFF4CAF50) // Green for TTL
                                         else -> MaterialTheme.colorScheme.onSurface
@@ -1004,8 +1132,8 @@ fun DashboardScreen() {
             title = { Text("🔋 Battery Optimization", fontWeight = FontWeight.Bold) },
             text = {
                 Text(
-                    "For uninterrupted highway classification tracking, please disable battery optimization.\n\n" +
-                            "This ensures TTL is sent every 20 seconds with full highway analysis.",
+                    "For uninterrupted tracking with all bug fixes, please disable battery optimization.\n\n" +
+                            "This ensures TTL is sent every 20 seconds with complete highway analysis, direction tracking, and speed jump detection.",
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
@@ -1049,9 +1177,9 @@ fun DashboardScreen() {
     }
 }
 
-// 🛣️ HIGHWAY CLASSIFICATION GPS CARD
+// 🆕 FIXED GPS CARD WITH DIRECTION TRACKING
 @Composable
-private fun HighwayClassificationGpsCard(
+private fun FixedGpsCard(
     isGpsTracking: Boolean,
     currentLocation: LocationData?,
     gpsManager: GPSLocationManager?,
@@ -1061,6 +1189,8 @@ private fun HighwayClassificationGpsCard(
     stableManager: StableSpeedLimitManager,
     currentHighwayInfo: StableSpeedLimitManager.HighwayInfo?,
     currentAltitude: Double,
+    currentCarDirection: Float?,  // 🆕 Car direction
+    directionTrackingStatus: String,  // 🆕 Direction status
     onToggleTracking: () -> Unit,
     onRefreshLocation: () -> Unit
 ) {
@@ -1074,7 +1204,7 @@ private fun HighwayClassificationGpsCard(
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("🛣️ GPS + Highway Classification System", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("🛣️ GPS + Complete Bug Fix System", fontWeight = FontWeight.Bold, fontSize = 18.sp)
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -1093,6 +1223,29 @@ private fun HighwayClassificationGpsCard(
                     fontWeight = FontWeight.Bold,
                     color = speedColor
                 )
+
+                // 🆕 DIRECTION TRACKING DISPLAY
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8EAF6))
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text(
+                            "🧭 Direction Tracking: $directionTrackingStatus",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF3F51B5),
+                            fontSize = 12.sp
+                        )
+                        if (currentCarDirection != null) {
+                            Text(
+                                "Heading: ${currentCarDirection.toInt()}° (${getDirectionText(currentCarDirection)})",
+                                color = Color(0xFF3F51B5),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
 
                 Text("🗺️ Region: $currentRegion", fontWeight = FontWeight.Bold)
 
@@ -1147,11 +1300,29 @@ private fun HighwayClassificationGpsCard(
                 }
 
                 Text(
-                    "📤 TTL Mode: Highway Classification + Continuous (20s)",
+                    "📤 TTL Mode: Complete Bug Fix System + Continuous (20s)",
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp
                 )
+
+                // 🆕 Bug fix status display
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E8))
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Text(
+                            "✅ All Bug Fixes Active:",
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF2E7D32),
+                            fontSize = 12.sp
+                        )
+                        Text("• Speed Jump Detection", color = Color(0xFF388E3C), fontSize = 10.sp)
+                        Text("• Direction Awareness", color = Color(0xFF388E3C), fontSize = 10.sp)
+                        Text("• Multi-Factor Road Selection", color = Color(0xFF388E3C), fontSize = 10.sp)
+                        Text("• Highway Stickiness", color = Color(0xFF388E3C), fontSize = 10.sp)
+                    }
+                }
 
                 // Health monitoring
                 if (consecutiveFailures > 0 || ttlSendFailures > 0) {
@@ -1163,7 +1334,7 @@ private fun HighwayClassificationGpsCard(
                     )
                 } else {
                     Text(
-                        "✅ All highway systems healthy",
+                        "✅ All systems healthy",
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
@@ -1180,7 +1351,7 @@ private fun HighwayClassificationGpsCard(
                     fontSize = 12.sp
                 )
             } ?: Text(
-                if (isGpsTracking) "📡 Acquiring GPS signal for highway analysis..." else "📍 Highway classification stopped",
+                if (isGpsTracking) "📡 Acquiring GPS signal for complete analysis..." else "📍 Complete bug fix system stopped",
                 color = Color.Gray
             )
 
@@ -1203,7 +1374,7 @@ private fun HighwayClassificationGpsCard(
                     val hasPermission = gpsManager?.hasLocationPermission() ?: false
                     Text(
                         if (isGpsTracking) "⏹️ Stop"
-                        else if (hasPermission) "🛣️ Start"
+                        else if (hasPermission) "🛣️ Start Fixed"
                         else "🔓 Enable"
                     )
                 }
@@ -1220,13 +1391,30 @@ private fun HighwayClassificationGpsCard(
     }
 }
 
-// 🛣️ HIGHWAY CLASSIFICATION CARD
+// 🆕 Helper function to get direction text
+private fun getDirectionText(degrees: Float): String {
+    return when ((degrees + 22.5f) % 360) {
+        in 0f..45f -> "N"
+        in 45f..90f -> "NE"
+        in 90f..135f -> "E"
+        in 135f..180f -> "SE"
+        in 180f..225f -> "S"
+        in 225f..270f -> "SW"
+        in 270f..315f -> "W"
+        in 315f..360f -> "NW"
+        else -> "N"
+    }
+}
+
+// 🆕 FIXED HIGHWAY CLASSIFICATION CARD WITH DIRECTION
 @Composable
-private fun HighwayClassificationCard(
+private fun FixedHighwayClassificationCard(
     currentHighwayInfo: StableSpeedLimitManager.HighwayInfo?,
     currentAltitude: Double,
     speedRoadRelation: String,
-    enforcementStatus: String
+    enforcementStatus: String,
+    currentCarDirection: Float?,  // 🆕 Car direction
+    directionTrackingStatus: String  // 🆕 Direction status
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1239,7 +1427,49 @@ private fun HighwayClassificationCard(
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("🛣️ Highway Classification Analysis", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("🛣️ Complete Bug Fix Analysis", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 🆕 Direction Information Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFE8EAF6))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "🧭 Direction Awareness",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF3F51B5)
+                    )
+
+                    Text(
+                        "Status: $directionTrackingStatus",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF3F51B5)
+                    )
+
+                    if (currentCarDirection != null) {
+                        Text(
+                            "Car Heading: ${currentCarDirection.toInt()}° (${getDirectionText(currentCarDirection)})",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1A237E)
+                        )
+                        Text(
+                            "✅ Direction data now used for accurate road selection",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF2E7D32)
+                        )
+                    } else {
+                        Text(
+                            "⏳ Acquiring direction data for improved accuracy...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF757575)
+                        )
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -1303,7 +1533,7 @@ private fun HighwayClassificationCard(
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                "📊 Speed vs Road Type:",
+                                "📊 Multi-Factor Analysis:",
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF2E7D32)
                             )
@@ -1312,6 +1542,11 @@ private fun HighwayClassificationCard(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF388E3C),
                                 fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "✅ Direction (40%) + Polyline Distance (30%) + Speed Match (20%) + Altitude (10%)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF2E7D32)
                             )
                         }
                     }
@@ -1328,7 +1563,7 @@ private fun HighwayClassificationCard(
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                "🚨 Highway 80+ km/h Enforcement:",
+                                "🚨 Complete System Status:",
                                 fontWeight = FontWeight.Bold,
                                 color = if (enforcementStatus.startsWith("✅")) Color(0xFF2E7D32) else Color(0xFFC62828)
                             )
@@ -1344,12 +1579,12 @@ private fun HighwayClassificationCard(
 
             } ?: run {
                 Text(
-                    "🔍 Analyzing highway type...",
+                    "🔍 Analyzing with complete bug fix system...",
                     color = Color.Gray,
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "Start GPS tracking to see highway classification",
+                    "Start GPS tracking to see all bug fixes in action",
                     color = Color.Gray,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -1358,19 +1593,22 @@ private fun HighwayClassificationCard(
     }
 }
 
-// 🛣️ HIGHWAY SPEED CARD
+// 🆕 FIXED HIGHWAY SPEED CARD WITH ALL BUG FIXES
 @Composable
-private fun HighwaySpeedCard(
+private fun FixedHighwaySpeedCard(
     currentSpeedLimit: SpeedLimitResult?,
     currentLocation: LocationData?,
     isLookingUpSpeedLimit: Boolean,
     currentHighwayInfo: StableSpeedLimitManager.HighwayInfo?,
-    currentAltitude: Double
+    currentAltitude: Double,
+    currentCarDirection: Float?,  // 🆕 Car direction
+    isSpeedJumpVerifying: Boolean  // 🆕 Speed jump status
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = when {
+                isSpeedJumpVerifying -> Color(0xFFFFEBEE) // Red tint for speed jump verification
                 currentSpeedLimit?.roadName?.contains("📤 TTL SENT") == true -> Color(0xFFE8F5E8) // Light green for TTL sent
                 currentSpeedLimit?.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFFF3E0) // Light orange for TTL wait
                 currentSpeedLimit?.source?.contains("highway") == true -> MaterialTheme.colorScheme.primaryContainer
@@ -1383,7 +1621,7 @@ private fun HighwaySpeedCard(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🛣️ Highway Speed Limit", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text("🛣️ Complete Bug Fix Speed System", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 if (isLookingUpSpeedLimit) {
                     Spacer(Modifier.width(8.dp))
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -1394,8 +1632,8 @@ private fun HighwaySpeedCard(
 
             when {
                 isLookingUpSpeedLimit -> {
-                    Text("⚡ Analyzing highway classification...", color = Color.Gray)
-                    Text("🛣️ Highway system: Motorway/Trunk/Primary + Bridge/Tunnel/Ground", color = Color.Gray, fontSize = 12.sp)
+                    Text("⚡ Analyzing with complete bug fix system...", color = Color.Gray)
+                    Text("🛣️ All fixes: Direction + Multi-Factor Selection + Speed Jump Detection + Highway Stickiness", color = Color.Gray, fontSize = 12.sp)
                 }
 
                 currentSpeedLimit?.speedLimit != null -> {
@@ -1411,6 +1649,7 @@ private fun HighwaySpeedCard(
                             style = MaterialTheme.typography.headlineLarge,
                             fontWeight = FontWeight.Bold,
                             color = when {
+                                isSpeedJumpVerifying -> Color(0xFFC62828) // Red for speed jump verification
                                 currentSpeedLimit.roadName?.contains("📤 TTL SENT") == true -> Color(0xFF4CAF50) // Green for TTL sent
                                 currentSpeedLimit.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFF9800) // Orange for TTL wait
                                 currentSpeedLimit.source?.contains("verification") == true -> Color(0xFFFF9800)
@@ -1418,8 +1657,8 @@ private fun HighwaySpeedCard(
                             }
                         )
 
-                        currentHighwayInfo?.let { highway ->
-                            Column(horizontalAlignment = Alignment.End) {
+                        Column(horizontalAlignment = Alignment.End) {
+                            currentHighwayInfo?.let { highway ->
                                 Text(
                                     highway.icon,
                                     style = MaterialTheme.typography.headlineMedium
@@ -1431,13 +1670,24 @@ private fun HighwaySpeedCard(
                                     color = if (highway.isHighway) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
                                 )
                             }
+
+                            // 🆕 Direction display
+                            if (currentCarDirection != null) {
+                                Text(
+                                    "🧭 ${currentCarDirection.toInt()}°",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF3F51B5)
+                                )
+                            }
                         }
                     }
 
-                    // Highway status indicator
+                    // System status indicator
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = when {
+                                isSpeedJumpVerifying -> Color(0xFFFFCDD2)
                                 currentSpeedLimit.roadName?.contains("📤 TTL SENT") == true -> Color(0xFFE8F5E8)
                                 currentSpeedLimit.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFFF3E0)
                                 currentSpeedLimit.source?.contains("highway") == true -> MaterialTheme.colorScheme.primaryContainer
@@ -1449,24 +1699,26 @@ private fun HighwaySpeedCard(
                         Column(modifier = Modifier.padding(8.dp)) {
                             Text(
                                 when {
-                                    currentSpeedLimit.source?.contains("stable_highway") == true -> "🔒 HIGHWAY STABLE: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("voting_highway") == true -> "🗳️ HIGHWAY VOTING: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("verification_highway") == true -> "🔍 HIGHWAY VERIFYING: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("highway") == true -> "🛣️ HIGHWAY: ${currentSpeedLimit.roadName}"
+                                    isSpeedJumpVerifying -> "🚨 SPEED JUMP VERIFICATION: ${currentSpeedLimit.roadName}"
+                                    currentSpeedLimit.source?.contains("stable_highway") == true -> "🔒 COMPLETE SYSTEM STABLE: ${currentSpeedLimit.roadName}"
+                                    currentSpeedLimit.source?.contains("voting_highway") == true -> "🗳️ COMPLETE SYSTEM VOTING: ${currentSpeedLimit.roadName}"
+                                    currentSpeedLimit.source?.contains("verification_highway") == true -> "🔍 COMPLETE SYSTEM VERIFYING: ${currentSpeedLimit.roadName}"
+                                    currentSpeedLimit.source?.contains("highway") == true -> "🛣️ COMPLETE SYSTEM: ${currentSpeedLimit.roadName}"
                                     else -> "📤 Active: ${currentSpeedLimit.roadName}"
                                 },
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = when {
+                                    isSpeedJumpVerifying -> Color(0xFFC62828)
                                     currentSpeedLimit.roadName?.contains("📤 TTL SENT") == true -> Color(0xFF2E7D32)
                                     currentSpeedLimit.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFE65100)
                                     else -> MaterialTheme.colorScheme.onSurface
                                 }
                             )
 
-                            // Highway system info
+                            // Complete system info
                             Text(
-                                "🛣️ System: Smart verification (Low→High: Fast, High→Low: Slow) + 80+ km/h enforcement + Altitude: ${String.format("%.1f", currentAltitude)}m",
+                                "🛣️ Complete System: Speed Jump Detection + Direction Tracking + Multi-Factor Selection + Highway Stickiness + Smart Verification + Altitude: ${String.format("%.1f", currentAltitude)}m",
                                 fontSize = 10.sp,
                                 color = Color.Gray,
                                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
@@ -1478,12 +1730,13 @@ private fun HighwaySpeedCard(
                     currentLocation?.let { loc ->
                         val limit = actualLimit
                         val isOverLimit = loc.speedKmh > limit + 5
+                        val directionInfo = if (loc.carDirection != null) " heading ${loc.carDirection!!.toInt()}°" else ""
 
                         Text(
                             if (isOverLimit)
-                                "⚠️ OVER LIMIT (${String.format("%.1f", loc.speedKmh)} km/h on ${currentHighwayInfo?.type ?: "road"})"
+                                "⚠️ OVER LIMIT (${String.format("%.1f", loc.speedKmh)} km/h on ${currentHighwayInfo?.type ?: "road"}$directionInfo)"
                             else
-                                "✅ Within limit (${String.format("%.1f", loc.speedKmh)} km/h on ${currentHighwayInfo?.type ?: "road"})",
+                                "✅ Within limit (${String.format("%.1f", loc.speedKmh)} km/h on ${currentHighwayInfo?.type ?: "road"}$directionInfo)",
                             color = if (isOverLimit)
                                 MaterialTheme.colorScheme.error
                             else
@@ -1494,22 +1747,22 @@ private fun HighwaySpeedCard(
                 }
 
                 currentLocation != null -> {
-                    Text("📍 Move to detect highway speed limits", color = Color.Gray)
-                    Text("🛣️ Highway classification: Motorway/Trunk/Primary + Bridge/Tunnel/Ground", color = Color.Gray, fontSize = 12.sp)
+                    Text("📍 Move to detect speed limits with complete bug fix system", color = Color.Gray)
+                    Text("🛣️ All fixes active: Direction + Multi-Factor + Speed Jump + Highway Stickiness", color = Color.Gray, fontSize = 12.sp)
                 }
 
                 else -> {
-                    Text("📡 Start GPS to check highway speed limits", color = Color.Gray)
-                    Text("🛣️ Highway system: Ready for classification + enforcement", color = Color.Gray, fontSize = 12.sp)
+                    Text("📡 Start GPS to check speed limits with all bug fixes", color = Color.Gray)
+                    Text("🛣️ Complete system ready: All bugs fixed and ready for action", color = Color.Gray, fontSize = 12.sp)
                 }
             }
         }
     }
 }
 
-// 🛣️ HIGHWAY TTL CONTROL CARD
+// 🆕 FIXED TTL CONTROL CARD
 @Composable
-private fun HighwayTtlControlCard(
+private fun FixedTtlControlCard(
     autoSendSpeedLimits: Boolean,
     onAutoSendToggle: (Boolean) -> Unit,
     manualSpeedLimit: String,
@@ -1524,7 +1777,7 @@ private fun HighwayTtlControlCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("🛣️ Highway TTL Control", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("🛣️ Complete Bug Fix TTL Control", fontWeight = FontWeight.Bold, fontSize = 18.sp)
 
             Spacer(modifier = Modifier.height(4.dp))
 
@@ -1534,7 +1787,7 @@ private fun HighwayTtlControlCard(
                 )
             ) {
                 Text(
-                    "🛣️ HIGHWAY SYSTEM: Classification + Ground Level + Smart Verification + 80+ km/h Enforcement + Continuous TTL",
+                    "🛣️ ALL BUGS FIXED: Speed Jump Detection + Direction Awareness + Multi-Factor Road Selection + Highway Stickiness + Smart Verification + Continuous TTL",
                     modifier = Modifier.padding(8.dp),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -1563,14 +1816,14 @@ private fun HighwayTtlControlCard(
                 }
 
                 Text(
-                    "📤 Last TTL: $timeSinceText (highway mode - 20s)",
+                    "📤 Last TTL: $timeSinceText (complete fixed system - 20s)",
                     color = MaterialTheme.colorScheme.secondary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp
                 )
             } else {
                 Text(
-                    "📤 No TTL sent yet (highway mode ready - 20s)",
+                    "📤 No TTL sent yet (complete fixed system ready - 20s)",
                     color = MaterialTheme.colorScheme.secondary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp
@@ -1585,7 +1838,7 @@ private fun HighwayTtlControlCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("🛣️ Auto-send (highway classification - 20s)")
+                Text("🛣️ Auto-send (complete fixed system - 20s)")
                 Switch(checked = autoSendSpeedLimits, onCheckedChange = onAutoSendToggle)
             }
 
@@ -1608,12 +1861,12 @@ private fun HighwayTtlControlCard(
                 enabled = SerialTtlManager.isConnected && manualSpeedLimit.toIntOrNull()?.let { it in 0..255 } == true,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("📤 Send Manual (Highway Mode)")
+                Text("📤 Send Manual (Complete Fixed System)")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text("Highway Quick Send:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Text("Complete Fixed System Quick Send:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1631,10 +1884,10 @@ private fun HighwayTtlControlCard(
                 }
             }
 
-            // Highway System Controls
+            // Complete System Controls
             Spacer(modifier = Modifier.height(12.dp))
 
-            Text("🛣️ Highway System Status:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Text("🛣️ Complete Bug Fix System Status:", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1644,8 +1897,8 @@ private fun HighwayTtlControlCard(
                     onClick = {
                         val status = stableManager.getCurrentStatus()
                         val statusText = status.entries.joinToString("\n") { "${it.key}: ${it.value}" }
-                        LogCollector.addLog("📊 Highway System Status:\n$statusText")
-                        Toast.makeText(context, "Check logs for highway system status", Toast.LENGTH_SHORT).show()
+                        LogCollector.addLog("📊 Complete Bug Fix System Status:\n$statusText")
+                        Toast.makeText(context, "Check logs for complete system status", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
@@ -1658,8 +1911,8 @@ private fun HighwayTtlControlCard(
                     onClick = {
                         val config = stableManager.getPersistenceConfig()
                         val configText = config.entries.joinToString("\n") { "${it.key}: ${it.value}" }
-                        LogCollector.addLog("🛣️ Highway Config:\n$configText")
-                        Toast.makeText(context, "Check logs for highway config", Toast.LENGTH_SHORT).show()
+                        LogCollector.addLog("🛣️ Complete Fixed System Config:\n$configText")
+                        Toast.makeText(context, "Check logs for complete system config", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3)),
@@ -1671,7 +1924,7 @@ private fun HighwayTtlControlCard(
                 Button(
                     onClick = {
                         stableManager.clearAll()
-                        Toast.makeText(context, "🧹 Highway system cleared", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "🧹 Complete bug fix system cleared", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),

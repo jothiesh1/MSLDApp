@@ -1,4 +1,4 @@
-// COMPLETE: Highway Classification + Continuous TTL + Smart Default Enforcement
+// COMPLETE: Highway Classification + Speed Jump Detection + Smart Default Enforcement
 // File: app/src/main/java/com/gpstracker/msldapp/uis/StableSpeedLimitManager.kt
 
 package com.gpstracker.msldapp.uis
@@ -9,14 +9,16 @@ import java.util.ArrayDeque
 import kotlinx.coroutines.*
 
 /**
- * 🛣️ COMPLETE HIGHWAY CLASSIFICATION + CONTINUOUS TTL + SMART DEFAULT ENFORCEMENT
+ * 🛣️ COMPLETE HIGHWAY CLASSIFICATION + SPEED JUMP DETECTION + CONTINUOUS TTL + SMART DEFAULT ENFORCEMENT
  * 1. Highway classification (motorway, trunk, primary, etc.)
  * 2. Ground level detection (bridge, tunnel, ground)
- * 3. Smart verification timing (fast low→high, slow high→low)
- * 4. SMART DEFAULT enforcement (send defaults for violations, actual speeds for proper)
- * 5. Altitude collection and display
- * 6. Continuous TTL for all states
- * 7. Smooth handling of speed jumping between proper/violation
+ * 3. SPEED JUMP DETECTION (140→60 km/h prevention)
+ * 4. Highway stickiness logic
+ * 5. Smart verification timing (fast low→high, slow high→low)
+ * 6. SMART DEFAULT enforcement (send defaults for violations, actual speeds for proper)
+ * 7. Altitude collection and display
+ * 8. Continuous TTL for all states
+ * 9. Smooth handling of speed jumping between proper/violation
  */
 class StableSpeedLimitManager {
 
@@ -56,6 +58,14 @@ class StableSpeedLimitManager {
     private var isVerifying = false
     private var requiredVerifications = 3  // Dynamic based on speed change
     private var verificationInterval = 1000L  // 1 second
+
+    // 🆕 SPEED JUMP DETECTION CONSTANTS
+    private companion object {
+        private const val LARGE_SPEED_JUMP_THRESHOLD = 60
+        private const val HIGHWAY_SPEED_THRESHOLD = 80f
+        private const val HIGH_SPEED_STICK_TIME = 15000L  // 15 seconds
+        private const val HIGHWAY_MIN_LIMIT = 80
+    }
 
     // 🛣️ HIGHWAY CLASSIFICATION SYSTEM
     data class HighwayInfo(
@@ -192,6 +202,213 @@ class StableSpeedLimitManager {
                 defaultSpeed = 50
             )
         }
+    }
+
+    /**
+     * 🆕 NEW: Speed jump detection
+     */
+    private fun isLargeSpeedJump(currentSpeed: Int?, newSpeed: Int): Boolean {
+        if (currentSpeed == null) return false
+        val speedDiff = abs(newSpeed - currentSpeed)
+
+        return when {
+            speedDiff >= LARGE_SPEED_JUMP_THRESHOLD -> true  // 140→60, 120→60
+            speedDiff >= 40 && currentSpeed > 100 -> true   // Highway drops
+            speedDiff >= 40 && newSpeed < currentSpeed -> true  // Large decreases
+            else -> false
+        }
+    }
+
+    /**
+     * 🆕 NEW: Highway stickiness logic
+     */
+    private fun shouldStickToHighwaySpeed(
+        currentSpeedLimit: Int?,
+        newSpeedLimit: Int,
+        drivingSpeed: Float,
+        timeSinceConfirmed: Long
+    ): Boolean {
+        if (currentSpeedLimit == null) return false
+
+        return when {
+            // Stick to highway when driving at highway speeds
+            drivingSpeed > HIGHWAY_SPEED_THRESHOLD &&
+                    currentSpeedLimit >= 100 &&
+                    newSpeedLimit < HIGHWAY_MIN_LIMIT &&
+                    timeSinceConfirmed < HIGH_SPEED_STICK_TIME -> {
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.OSM,
+                    "🔒 HIGHWAY STICKINESS: Staying on ${currentSpeedLimit}km/h (driving ${drivingSpeed.toInt()}km/h)"
+                )
+                true
+            }
+
+            // Stick to high speeds temporarily
+            currentSpeedLimit >= 100 &&
+                    newSpeedLimit <= 60 &&
+                    timeSinceConfirmed < 8000L -> {
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.OSM,
+                    "⏱️ TEMPORARY STICK: ${currentSpeedLimit}km/h→${newSpeedLimit}km/h (${timeSinceConfirmed/1000}s)"
+                )
+                true
+            }
+
+            else -> false
+        }
+    }
+
+    /**
+     * 🆕 NEW: Enhanced speed jump verification
+     */
+    private fun handleSpeedJumpVerification(
+        currentSpeedLimit: Int,
+        newSpeedLimit: Int,
+        currentSpeed: Float,
+        location: Triple<Double, Double, Double>,
+        highwayInfo: HighwayInfo,
+        enforcementReason: String
+    ): StableSpeedResult {
+
+        val speedDiff = abs(newSpeedLimit - currentSpeedLimit)
+        val currentTime = System.currentTimeMillis()
+
+        // Determine verification requirements based on jump size
+        val (requiredVerifications, verificationInterval) = when {
+            // Extreme jumps (140→60) - Very careful
+            speedDiff >= 80 && currentSpeed > 100f -> {
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.OSM,
+                    "🚨 EXTREME SPEED JUMP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 6 verifications needed"
+                )
+                Pair(6, 2000L)  // 6 checks, 2s each = 12 seconds
+            }
+
+            // Large highway speed drops - Careful
+            speedDiff >= 60 && currentSpeedLimit >= 100 -> {
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.OSM,
+                    "⚠️ LARGE HIGHWAY DROP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 5 verifications needed"
+                )
+                Pair(5, 1500L)  // 5 checks, 1.5s each = 7.5 seconds
+            }
+
+            // Medium jumps - Standard verification
+            speedDiff >= 40 -> {
+                LogCollector.addDetailedLog(
+                    LogCollector.LogCategory.OSM,
+                    "⚠️ MEDIUM JUMP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 4 verifications needed"
+                )
+                Pair(4, 1000L)  // 4 checks, 1s each = 4 seconds
+            }
+
+            else -> Pair(3, 1000L)  // 3 checks, 1s each = 3 seconds
+        }
+
+        // Start or continue verification
+        when {
+            !isVerifying || pendingSpeedLimit != newSpeedLimit -> {
+                // Start new verification
+                startSpeedJumpVerification(newSpeedLimit, enforcementReason, requiredVerifications, verificationInterval)
+
+                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
+
+                return StableSpeedResult.SpeedJumpVerification(
+                    currentSpeedLimit = currentSpeedLimit,
+                    newSpeedLimit = newSpeedLimit,
+                    verificationCount = 1,
+                    requiredVerifications = requiredVerifications,
+                    jumpSize = speedDiff,
+                    drivingSpeed = currentSpeed,
+                    nextCheckIn = verificationInterval / 1000,
+                    altitude = location.third,
+                    highwayInfo = highwayInfo,
+                    enforcementReason = enforcementReason,
+                    sendToTtl = shouldSendTtl,
+                    ttlReason = "speed_jump_verification"
+                )
+            }
+
+            currentTime - lastVerificationTime >= verificationInterval -> {
+                // Continue verification
+                verificationCount++
+                lastVerificationTime = currentTime
+
+                if (verificationCount >= requiredVerifications) {
+                    // Verification complete - accept speed change
+                    completeVerificationWithHighway(newSpeedLimit, enforcementReason, location, highwayInfo)
+
+                    LogCollector.addDetailedLog(
+                        LogCollector.LogCategory.OSM,
+                        "✅ SPEED JUMP VERIFIED: ${currentSpeedLimit}→${newSpeedLimit}km/h after ${requiredVerifications} checks"
+                    )
+
+                    return StableSpeedResult.VerificationComplete(
+                        speedLimit = newSpeedLimit,
+                        reason = "speed_jump_verified_${enforcementReason}",
+                        checksPerformed = requiredVerifications,
+                        altitude = location.third,
+                        highwayInfo = highwayInfo,
+                        enforcementReason = enforcementReason,
+                        sendToTtl = true,
+                        ttlReason = "speed_jump_complete"
+                    )
+                } else {
+                    // Continue verification
+                    val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
+
+                    return StableSpeedResult.SpeedJumpVerification(
+                        currentSpeedLimit = currentSpeedLimit,
+                        newSpeedLimit = newSpeedLimit,
+                        verificationCount = verificationCount,
+                        requiredVerifications = requiredVerifications,
+                        jumpSize = speedDiff,
+                        drivingSpeed = currentSpeed,
+                        nextCheckIn = verificationInterval / 1000,
+                        altitude = location.third,
+                        highwayInfo = highwayInfo,
+                        enforcementReason = enforcementReason,
+                        sendToTtl = shouldSendTtl,
+                        ttlReason = "speed_jump_verification_continuous"
+                    )
+                }
+            }
+
+            else -> {
+                // Waiting for next verification check
+                val timeRemaining = verificationInterval - (currentTime - lastVerificationTime)
+                val secondsRemaining = (timeRemaining / 1000).coerceAtLeast(0)
+                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
+
+                return StableSpeedResult.SpeedJumpVerification(
+                    currentSpeedLimit = currentSpeedLimit,
+                    newSpeedLimit = newSpeedLimit,
+                    verificationCount = verificationCount,
+                    requiredVerifications = requiredVerifications,
+                    jumpSize = speedDiff,
+                    drivingSpeed = currentSpeed,
+                    nextCheckIn = secondsRemaining,
+                    altitude = location.third,
+                    highwayInfo = highwayInfo,
+                    enforcementReason = enforcementReason,
+                    sendToTtl = shouldSendTtl,
+                    ttlReason = "speed_jump_waiting"
+                )
+            }
+        }
+    }
+
+    /**
+     * 🆕 NEW: Start speed jump verification
+     */
+    private fun startSpeedJumpVerification(speedLimit: Int, enforcementReason: String, reqVerifications: Int, verifyInterval: Long) {
+        pendingSpeedLimit = speedLimit
+        pendingEnforcementReason = enforcementReason
+        verificationCount = 1
+        lastVerificationTime = System.currentTimeMillis()
+        isVerifying = true
+        requiredVerifications = reqVerifications
+        verificationInterval = verifyInterval
     }
 
     /**
@@ -341,7 +558,7 @@ class StableSpeedLimitManager {
     }
 
     /**
-     * 🎯 MAIN FUNCTION: Complete highway-aware speed limit with smart default enforcement
+     * 🎯 MAIN FUNCTION: Complete highway-aware speed limit with smart default enforcement + SPEED JUMP DETECTION
      */
     fun getStableSpeedLimit(
         rawLat: Double,
@@ -412,14 +629,14 @@ class StableSpeedLimitManager {
             }
         }
 
-        // Case 2: OSM works - highway-aware processing with smart enforcement
+        // Case 2: OSM works - highway-aware processing with smart enforcement + SPEED JUMP DETECTION
         noDataCount = 0
         val smoothLocation = smoothGPSCoordinates(rawLat, rawLon, rawAltitude)
 
         // 🚨 SMART DEFAULT ENFORCEMENT
         val (enforcedSpeedLimit, enforcementReason) = enforceHighwaySpeed(rawSpeedLimit, highwayInfo)
 
-        // Check if we should stick to confirmed road - WITH CONTINUOUS TTL
+        // 🆕 HIGHWAY STICKINESS CHECK WITH SPEED JUMP AWARENESS
         val shouldStick = shouldStickToConfirmedRoad(smoothLocation, enforcedSpeedLimit, enforcementReason, highwayInfo)
         if (shouldStick) {
             if (isVerifying) {
@@ -442,11 +659,41 @@ class StableSpeedLimitManager {
             )
         }
 
-        // 🆕 SMART VERIFICATION with enforcement reason tracking
+        // 🆕 SPEED JUMP DETECTION + ENHANCED VERIFICATION with enforcement reason tracking
         val currentConfirmed = confirmedSpeedLimit
         val currentEnforcementReason = confirmedEnforcementReason
 
         if (currentConfirmed != null && (enforcedSpeedLimit != currentConfirmed || enforcementReason != currentEnforcementReason)) {
+
+            // 🚨 CHECK FOR SPEED JUMPS FIRST
+            if (isLargeSpeedJump(currentConfirmed, enforcedSpeedLimit)) {
+                return handleSpeedJumpVerification(
+                    currentConfirmed,
+                    enforcedSpeedLimit,
+                    currentSpeed,
+                    smoothLocation,
+                    highwayInfo,
+                    enforcementReason
+                )
+            }
+
+            // 🔒 HIGHWAY STICKINESS FOR HIGH SPEEDS
+            if (shouldStickToHighwaySpeed(currentConfirmed, enforcedSpeedLimit, currentSpeed, System.currentTimeMillis() - roadConfirmedAt)) {
+                val shouldSendTtl = shouldSendContinuousTtl(currentConfirmed)
+
+                return StableSpeedResult.Confirmed(
+                    speedLimit = currentConfirmed,
+                    reason = "highway_stickiness_${currentEnforcementReason}",
+                    timeSinceConfirmed = System.currentTimeMillis() - roadConfirmedAt,
+                    altitude = smoothLocation.third,
+                    highwayInfo = confirmedHighwayInfo!!,
+                    enforcementReason = currentEnforcementReason ?: "unknown",
+                    sendToTtl = shouldSendTtl,
+                    ttlReason = "highway_stickiness_continuous"
+                )
+            }
+
+            // Normal smart verification
             return handleSmartHighwayVerification(
                 enforcedSpeedLimit,
                 currentConfirmed,
@@ -775,7 +1022,7 @@ class StableSpeedLimitManager {
         val totalVotes = votes.values.sum()
         val winner = votes.maxByOrNull { it.value }
         val winnerLimit = winner?.key ?: speedLimit
-        val winnerCount = winner?.value ?:
+        val winnerCount = winner?.value ?: 0
         val winnerPercentage = winnerCount.toFloat() / totalVotes
 
         val oldestVoteTime = votingStartTime.values.minOrNull() ?: currentTime
@@ -847,15 +1094,16 @@ class StableSpeedLimitManager {
         } else "Never"
 
         return mapOf(
-            "System" to "Complete Highway + Smart Default Enforcement + Continuous TTL",
+            "System" to "Complete Highway + Speed Jump Detection + Smart Default Enforcement + Continuous TTL",
             "Confirmed Speed" to "${confirmedSpeedLimit ?: "None"}km/h${if (confirmedReason != null) " ($confirmedReason)" else ""}",
             "Confirmed Highway" to (confirmedHighway?.description ?: "None"),
             "Confirmed Altitude" to "${confirmedAltitude?.let { String.format("%.1f", it) } ?: "None"}m",
             "Last Known Speed" to "${lastKnown ?: "None"}km/h ($lastKnownTime)${if (lastKnownReason != null) " ($lastKnownReason)" else ""}",
             "Last Known Highway" to (lastKnownHighway?.description ?: "None"),
             "Last TTL Sent" to "${lastSentSpeedLimit ?: "None"}km/h ($lastSentTime)",
-            "Verification Mode" to "Smart Highway + Enforcement Reason (Proper↔Default transitions)",
+            "Verification Mode" to "Smart Highway + Speed Jump Detection + Enforcement Reason (Proper↔Default transitions)",
             "Speed Enforcement" to "Smart Defaults: Proper speeds → Send actual, Violations → Send defaults",
+            "Speed Jump Detection" to "ENABLED: 140→60 km/h prevention + Highway stickiness",
             "TTL Mode" to "Continuous All States (20s interval)"
         )
     }
@@ -889,7 +1137,7 @@ class StableSpeedLimitManager {
         lastTtlSendTime = 0L
         lastSentSpeedLimit = null
 
-        LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "🧹 System cleared (complete highway + smart default enforcement + continuous TTL)")
+        LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "🧹 System cleared (complete highway + speed jump detection + smart default enforcement + continuous TTL)")
     }
 
     fun hasStableSpeedLimit(): Boolean = confirmedSpeedLimit != null
@@ -913,19 +1161,23 @@ class StableSpeedLimitManager {
 
     fun getPersistenceConfig(): Map<String, String> {
         return mapOf(
-            "System Type" to "Complete Highway + Smart Default Enforcement + Continuous TTL",
+            "System Type" to "Complete Highway + Speed Jump Detection + Smart Default Enforcement + Continuous TTL",
             "TTL Interval" to "${TTL_SEND_INTERVAL/1000}s (20s)",
             "Enforcement Logic" to "Proper speeds → Send actual, Violations → Send defaults",
+            "Speed Jump Detection" to "ENABLED: 140→60 km/h + Highway stickiness",
+            "Highway Stickiness" to "High speeds stick for 15s, extreme jumps need 6 verifications",
             "Default→Proper" to "FAST: 2 checks (found proper speed!)",
             "Proper→Default" to "IMMEDIATE: 1 check (violation detected)",
             "Proper Increase" to "FAST: 2 checks, 1s each",
             "Proper Decrease" to "SLOW: 4 checks, 1s each",
+            "Extreme Jumps" to "VERY SLOW: 6 checks, 2s each = 12s verification",
+            "Large Jumps" to "CAREFUL: 5 checks, 1.5s each = 7.5s verification",
             "Highway Defaults" to "Motorway:120, Trunk:100, Primary:70, Secondary:50, Residential:30",
             "Classification" to "Motorway/Trunk/Primary/Secondary/Residential/Service",
             "Ground Level" to "Bridge/Tunnel/Ground detection",
             "Altitude Collection" to "ENABLED",
             "TTL for All States" to "ENABLED",
-            "Jump Handling" to "Smooth transitions between proper/default speeds"
+            "Jump Handling" to "Smooth transitions between proper/default speeds + Speed jump prevention"
         )
     }
 
@@ -947,7 +1199,7 @@ class StableSpeedLimitManager {
     }
 }
 
-// 🛣️ COMPLETE RESULT TYPES WITH HIGHWAY INFO, ENFORCEMENT REASON AND CONTINUOUS TTL
+// 🛣️ COMPLETE RESULT TYPES WITH HIGHWAY INFO, ENFORCEMENT REASON AND CONTINUOUS TTL + SPEED JUMP DETECTION
 sealed class StableSpeedResult {
     object NoData : StableSpeedResult()
 
@@ -1019,6 +1271,22 @@ sealed class StableSpeedResult {
         val enforcementReason: String = "unknown",
         val sendToTtl: Boolean = false,
         val ttlReason: String = "verification_complete"
+    ) : StableSpeedResult()
+
+    // 🆕 NEW: Speed Jump Verification Result
+    data class SpeedJumpVerification(
+        val currentSpeedLimit: Int,
+        val newSpeedLimit: Int,
+        val verificationCount: Int,
+        val requiredVerifications: Int,
+        val jumpSize: Int,
+        val drivingSpeed: Float,
+        val nextCheckIn: Long,
+        val altitude: Double = 0.0,
+        val highwayInfo: StableSpeedLimitManager.HighwayInfo? = null,
+        val enforcementReason: String = "unknown",
+        val sendToTtl: Boolean = false,
+        val ttlReason: String = "speed_jump_verification"
     ) : StableSpeedResult()
 }
 
