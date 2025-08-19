@@ -40,6 +40,8 @@ class MainActivity : ComponentActivity() {
     private val ACTION_USB_PERMISSION = "${packageName}.USB_PERMISSION"
 
     // Retry mechanism
+
+
     private var ttlInitRetryCount = 0
     private val maxTtlRetries = 3
     private val ttlRetryDelayMs = 2000L
@@ -546,6 +548,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Updated AppNavigation function - Replace the existing one at the bottom of your MainActivity.kt
+// Updated AppNavigation function - Replace the existing one at the bottom of your MainActivity.kt
+
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Composable
 fun AppNavigation() {
@@ -558,16 +563,16 @@ fun AppNavigation() {
 
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.INFO,
-                "App navigation initialized"
+                "App navigation initialized with HomeScreen"
             )
         } catch (e: Exception) {
             LogCollector.logError("Error setting up navigation", e)
         }
     }
 
-    NavHost(navController = navController, startDestination = "dashboard") {
-        composable("dashboard") {
-            DashboardScreen()
+    NavHost(navController = navController, startDestination = "home") {  // Changed from "dashboard" to "home"
+        composable("home") {  // Changed from "dashboard" to "home"
+            HomeScreen()  // Changed from DashboardScreen() to HomeScreen()
         }
         composable("map") {
             // LiveHereMapWithAutoLocation()
