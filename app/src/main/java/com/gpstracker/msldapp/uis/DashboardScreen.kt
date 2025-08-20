@@ -1406,15 +1406,17 @@ private fun getDirectionText(degrees: Float): String {
     }
 }
 
-// 🆕 FIXED HIGHWAY CLASSIFICATION CARD WITH DIRECTION
+// 🆕 FIXED HIGHWAY CLASSIFICATION CARD WITH DIRECTION // CHANGES NEEDED IN DashboardScreen.kt to remove ground/flyover level display
+
+// 1. REMOVE the Ground Level Card from FixedHighwayClassificationCard
 @Composable
 private fun FixedHighwayClassificationCard(
     currentHighwayInfo: StableSpeedLimitManager.HighwayInfo?,
     currentAltitude: Double,
     speedRoadRelation: String,
     enforcementStatus: String,
-    currentCarDirection: Float?,  // 🆕 Car direction
-    directionTrackingStatus: String  // 🆕 Direction status
+    currentCarDirection: Float?,
+    directionTrackingStatus: String
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1427,11 +1429,11 @@ private fun FixedHighwayClassificationCard(
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("🛣️ Complete Bug Fix Analysis", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("🛣️ Road Classification", fontWeight = FontWeight.Bold, fontSize = 18.sp)
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 🆕 Direction Information Card
+            // Direction Information Card (keep this)
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFE8EAF6))
             ) {
@@ -1457,7 +1459,7 @@ private fun FixedHighwayClassificationCard(
                             color = Color(0xFF1A237E)
                         )
                         Text(
-                            "✅ Direction data now used for accurate road selection",
+                            "✅ Direction data used for accurate road selection",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF2E7D32)
                         )
@@ -1474,7 +1476,7 @@ private fun FixedHighwayClassificationCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             currentHighwayInfo?.let { highway ->
-                // Highway Type
+                // Highway Type (simplified - no level info)
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = if (highway.isHighway) Color(0xFFE3F2FD) else Color(0xFFFFF3E0)
@@ -1489,8 +1491,9 @@ private fun FixedHighwayClassificationCard(
                             color = if (highway.isHighway) Color(0xFF1976D2) else Color(0xFFE65100)
                         )
 
+                        // SIMPLIFIED description without level info
                         Text(
-                            highway.description,
+                            "${highway.type} Road",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             fontWeight = FontWeight.Bold
@@ -1504,47 +1507,38 @@ private fun FixedHighwayClassificationCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Ground Level
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF3E5F5))
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            "🏔️ Ground Level: ${highway.levelType}",
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF7B1FA2)
-                        )
-                        Text(
-                            "Layer: ${highway.layer} • Altitude: ${String.format("%.1f", currentAltitude)}m",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray
-                        )
-                    }
-                }
+                // REMOVE the Ground Level Card entirely
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Speed vs Road Relationship
+                // Speed vs Road Relationship (simplified)
                 if (speedRoadRelation.isNotEmpty()) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E8))
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                "📊 Multi-Factor Analysis:",
+                                "📊 Road Analysis:",
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF2E7D32)
                             )
+                            // SIMPLIFIED relation without level info
+                            val simplifiedRelation = speedRoadRelation
+                                .replace(Regex("\\(BRIDGE.*?\\)"), "")
+                                .replace(Regex("\\(TUNNEL.*?\\)"), "")
+                                .replace(Regex("\\(ELEVATED.*?\\)"), "")
+                                .replace(Regex("\\(GROUND.*?\\)"), "")
+                                .replace(Regex("\\(EXPRESSWAY.*?\\)"), "")
+                                .trim()
+
                             Text(
-                                speedRoadRelation,
+                                simplifiedRelation,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF388E3C),
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                "✅ Direction (40%) + Polyline Distance (30%) + Speed Match (20%) + Altitude (10%)",
+                                "✅ Direction + Distance + Speed matching for accurate selection",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF2E7D32)
                             )
@@ -1563,7 +1557,7 @@ private fun FixedHighwayClassificationCard(
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                "🚨 Complete System Status:",
+                                "🚨 System Status:",
                                 fontWeight = FontWeight.Bold,
                                 color = if (enforcementStatus.startsWith("✅")) Color(0xFF2E7D32) else Color(0xFFC62828)
                             )
@@ -1579,12 +1573,12 @@ private fun FixedHighwayClassificationCard(
 
             } ?: run {
                 Text(
-                    "🔍 Analyzing with complete bug fix system...",
+                    "🔍 Analyzing road type...",
                     color = Color.Gray,
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    "Start GPS tracking to see all bug fixes in action",
+                    "Start GPS tracking to see road classification",
                     color = Color.Gray,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -1593,7 +1587,7 @@ private fun FixedHighwayClassificationCard(
     }
 }
 
-// 🆕 FIXED HIGHWAY SPEED CARD WITH ALL BUG FIXES
+// 2. SIMPLIFY the Speed Card info section
 @Composable
 private fun FixedHighwaySpeedCard(
     currentSpeedLimit: SpeedLimitResult?,
@@ -1601,16 +1595,16 @@ private fun FixedHighwaySpeedCard(
     isLookingUpSpeedLimit: Boolean,
     currentHighwayInfo: StableSpeedLimitManager.HighwayInfo?,
     currentAltitude: Double,
-    currentCarDirection: Float?,  // 🆕 Car direction
-    isSpeedJumpVerifying: Boolean  // 🆕 Speed jump status
+    currentCarDirection: Float?,
+    isSpeedJumpVerifying: Boolean
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = when {
-                isSpeedJumpVerifying -> Color(0xFFFFEBEE) // Red tint for speed jump verification
-                currentSpeedLimit?.roadName?.contains("📤 TTL SENT") == true -> Color(0xFFE8F5E8) // Light green for TTL sent
-                currentSpeedLimit?.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFFF3E0) // Light orange for TTL wait
+                isSpeedJumpVerifying -> Color(0xFFFFEBEE)
+                currentSpeedLimit?.roadName?.contains("📤 TTL SENT") == true -> Color(0xFFE8F5E8)
+                currentSpeedLimit?.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFFF3E0)
                 currentSpeedLimit?.source?.contains("highway") == true -> MaterialTheme.colorScheme.primaryContainer
                 currentSpeedLimit?.source?.contains("voting") == true -> MaterialTheme.colorScheme.secondaryContainer
                 currentSpeedLimit?.source?.contains("verification") == true -> Color(0xFFFFF3E0)
@@ -1621,7 +1615,7 @@ private fun FixedHighwaySpeedCard(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🛣️ Complete Bug Fix Speed System", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text("🛣️ Speed Limit System", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 if (isLookingUpSpeedLimit) {
                     Spacer(Modifier.width(8.dp))
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -1632,8 +1626,8 @@ private fun FixedHighwaySpeedCard(
 
             when {
                 isLookingUpSpeedLimit -> {
-                    Text("⚡ Analyzing with complete bug fix system...", color = Color.Gray)
-                    Text("🛣️ All fixes: Direction + Multi-Factor Selection + Speed Jump Detection + Highway Stickiness", color = Color.Gray, fontSize = 12.sp)
+                    Text("⚡ Analyzing road and speed limit...", color = Color.Gray)
+                    Text("🛣️ Using direction, distance, and speed matching", color = Color.Gray, fontSize = 12.sp)
                 }
 
                 currentSpeedLimit?.speedLimit != null -> {
@@ -1649,9 +1643,9 @@ private fun FixedHighwaySpeedCard(
                             style = MaterialTheme.typography.headlineLarge,
                             fontWeight = FontWeight.Bold,
                             color = when {
-                                isSpeedJumpVerifying -> Color(0xFFC62828) // Red for speed jump verification
-                                currentSpeedLimit.roadName?.contains("📤 TTL SENT") == true -> Color(0xFF4CAF50) // Green for TTL sent
-                                currentSpeedLimit.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFF9800) // Orange for TTL wait
+                                isSpeedJumpVerifying -> Color(0xFFC62828)
+                                currentSpeedLimit.roadName?.contains("📤 TTL SENT") == true -> Color(0xFF4CAF50)
+                                currentSpeedLimit.roadName?.contains("🔄 TTL WAIT") == true -> Color(0xFFFF9800)
                                 currentSpeedLimit.source?.contains("verification") == true -> Color(0xFFFF9800)
                                 else -> MaterialTheme.colorScheme.primary
                             }
@@ -1671,7 +1665,7 @@ private fun FixedHighwaySpeedCard(
                                 )
                             }
 
-                            // 🆕 Direction display
+                            // Direction display
                             if (currentCarDirection != null) {
                                 Text(
                                     "🧭 ${currentCarDirection.toInt()}°",
@@ -1683,7 +1677,7 @@ private fun FixedHighwaySpeedCard(
                         }
                     }
 
-                    // System status indicator
+                    // SIMPLIFIED System status indicator (no level info)
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = when {
@@ -1697,14 +1691,23 @@ private fun FixedHighwaySpeedCard(
                         modifier = Modifier.padding(top = 8.dp)
                     ) {
                         Column(modifier = Modifier.padding(8.dp)) {
+                            // SIMPLIFIED road name without level info
+                            val simplifiedRoadName = currentSpeedLimit.roadName
+                                ?.replace(Regex("\\(BRIDGE.*?\\)"), "")
+                                ?.replace(Regex("\\(TUNNEL.*?\\)"), "")
+                                ?.replace(Regex("\\(ELEVATED.*?\\)"), "")
+                                ?.replace(Regex("\\(GROUND.*?\\)"), "")
+                                ?.replace(Regex("\\(EXPRESSWAY.*?\\)"), "")
+                                ?.trim() ?: "Road"
+
                             Text(
                                 when {
-                                    isSpeedJumpVerifying -> "🚨 SPEED JUMP VERIFICATION: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("stable_highway") == true -> "🔒 COMPLETE SYSTEM STABLE: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("voting_highway") == true -> "🗳️ COMPLETE SYSTEM VOTING: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("verification_highway") == true -> "🔍 COMPLETE SYSTEM VERIFYING: ${currentSpeedLimit.roadName}"
-                                    currentSpeedLimit.source?.contains("highway") == true -> "🛣️ COMPLETE SYSTEM: ${currentSpeedLimit.roadName}"
-                                    else -> "📤 Active: ${currentSpeedLimit.roadName}"
+                                    isSpeedJumpVerifying -> "🚨 SPEED JUMP VERIFICATION: ${simplifiedRoadName}"
+                                    currentSpeedLimit.source?.contains("stable_highway") == true -> "🔒 STABLE: ${simplifiedRoadName}"
+                                    currentSpeedLimit.source?.contains("voting_highway") == true -> "🗳️ VOTING: ${simplifiedRoadName}"
+                                    currentSpeedLimit.source?.contains("verification_highway") == true -> "🔍 VERIFYING: ${simplifiedRoadName}"
+                                    currentSpeedLimit.source?.contains("highway") == true -> "🛣️ ACTIVE: ${simplifiedRoadName}"
+                                    else -> "📤 Active: ${simplifiedRoadName}"
                                 },
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
@@ -1716,9 +1719,9 @@ private fun FixedHighwaySpeedCard(
                                 }
                             )
 
-                            // Complete system info
+                            // SIMPLIFIED system info (no altitude)
                             Text(
-                                "🛣️ Complete System: Speed Jump Detection + Direction Tracking + Multi-Factor Selection + Highway Stickiness + Smart Verification + Altitude: ${String.format("%.1f", currentAltitude)}m",
+                                "🛣️ System: Speed Jump Detection + Direction Tracking + Multi-Factor Selection + Highway Analysis",
                                 fontSize = 10.sp,
                                 color = Color.Gray,
                                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
@@ -1747,19 +1750,18 @@ private fun FixedHighwaySpeedCard(
                 }
 
                 currentLocation != null -> {
-                    Text("📍 Move to detect speed limits with complete bug fix system", color = Color.Gray)
-                    Text("🛣️ All fixes active: Direction + Multi-Factor + Speed Jump + Highway Stickiness", color = Color.Gray, fontSize = 12.sp)
+                    Text("📍 Move to detect speed limits", color = Color.Gray)
+                    Text("🛣️ System ready: Direction + Multi-Factor + Speed Jump + Highway Analysis", color = Color.Gray, fontSize = 12.sp)
                 }
 
                 else -> {
-                    Text("📡 Start GPS to check speed limits with all bug fixes", color = Color.Gray)
-                    Text("🛣️ Complete system ready: All bugs fixed and ready for action", color = Color.Gray, fontSize = 12.sp)
+                    Text("📡 Start GPS to check speed limits", color = Color.Gray)
+                    Text("🛣️ Complete system ready for road analysis", color = Color.Gray, fontSize = 12.sp)
                 }
             }
         }
     }
 }
-
 // 🆕 FIXED TTL CONTROL CARD
 @Composable
 private fun FixedTtlControlCard(

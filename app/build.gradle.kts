@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.gpstracker.msldapp.speedlimited.dubai2"
+        applicationId = "com.gpstracker.msldapp.speedlimited.BLR"
         minSdk = 28
         targetSdk = 35
         versionCode = 2

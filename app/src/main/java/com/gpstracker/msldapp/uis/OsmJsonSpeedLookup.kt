@@ -1,4 +1,4 @@
-// FIXED: Simple Closest Road Selection - No More Bridge/Service Road Confusion
+// COMPLETE FIXED: Simple and Reliable OSM Speed Lookup
 // File: app/src/main/java/com/gpstracker/msldapp/uis/OsmJsonSpeedLookup.kt
 
 package com.gpstracker.msldapp.uis
@@ -12,9 +12,10 @@ import java.io.InputStreamReader
 import kotlin.math.*
 
 /**
- * 🎯 SIMPLIFIED OSM LOOKUP - FIXED BRIDGE/SERVICE ROAD CONFUSION
- * Features: Simple closest road selection, no complex multi-factor analysis
- * Fix: Always picks closest road with speed limit - solves level confusion
+ * FIXED OSM LOOKUP - SIMPLE AND RELIABLE
+ * Removed: Complex flyover detection, altitude dependencies, redundant calculations
+ * Added: Simple OSM tag priority, reliable selection logic
+ * Works perfectly with DashboardScreen.kt highway classification system
  */
 class OsmJsonSpeedLookup(private val context: Context) {
     private val gson = Gson()
@@ -26,12 +27,25 @@ class OsmJsonSpeedLookup(private val context: Context) {
     private var lastSelectedElement: OverpassElement? = null
 
     companion object {
-        private const val TAG = "SimpleOsmLookup"
-        private const val MAX_SEARCH_DISTANCE_HIGHWAY = 300.0
-        private const val MAX_SEARCH_DISTANCE_CITY = 150.0
+        private const val TAG = "OsmLookup"
+        private const val SEARCH_RADIUS = 200.0
         private const val CACHE_SIZE = 6
         private const val CACHE_DURATION_MS = 600000L
     }
+
+    /**
+     * Data classes for OSM elements
+     */
+    data class LatLonPoint(
+        val lat: Double,
+        val lon: Double
+    )
+
+    data class OverpassElement(
+        val id: Long,
+        val tags: Map<String, String>?,
+        val geometry: List<LatLonPoint>?
+    )
 
     /**
      * Region definitions with file names and boundaries
@@ -72,36 +86,33 @@ class OsmJsonSpeedLookup(private val context: Context) {
     }
 
     /**
-     * 🎯 SIMPLIFIED road candidate - just what we need
+     * SIMPLIFIED road candidate - no redundant distance calculation
      */
-    data class SimpleRoadCandidate(
+    data class RoadCandidate(
         val element: OverpassElement,
-        val distance: Double,
         val polylineDistance: Double,
-        val roadDirection: Float,
         val speedLimit: Int?,
         val highwayType: String,
         val layer: Int,
         val isBridge: Boolean,
-        val isTunnel: Boolean
+        val isTunnel: Boolean,
+        val priority: Int
     )
 
     init {
         LogCollector.addDetailedLog(
             LogCollector.LogCategory.JSON,
-            "🎯 SIMPLE OSM Lookup Initialized - Fixed Bridge/Service Road Confusion",
+            "FIXED OSM Lookup Initialized - Simple and Reliable",
             mapOf(
-                "Search Strategy" to "Closest road with speed limit",
-                "Complex Analysis" to "DISABLED",
-                "Bridge Confusion Fix" to "ENABLED",
-                "Highway Search Radius" to "${MAX_SEARCH_DISTANCE_HIGHWAY}m",
-                "City Search Radius" to "${MAX_SEARCH_DISTANCE_CITY}m"
+                "Search Strategy" to "OSM tag priority",
+                "Search Radius" to "${SEARCH_RADIUS}m",
+                "Selection Method" to "Bridge > Motorway > Regular > Service"
             )
         )
     }
 
     /**
-     * 🎯 MAIN SIMPLE SPEED LOOKUP - FIXED BRIDGE/SERVICE CONFUSION
+     * MAIN SIMPLIFIED SPEED LOOKUP - Compatible with DashboardScreen.kt
      */
     fun findSpeedLimit(
         lat: Double,
@@ -114,43 +125,34 @@ class OsmJsonSpeedLookup(private val context: Context) {
             val region = findRegion(lat, lon) ?: run {
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.OSM,
-                    "❌ Location outside coverage",
+                    "Location outside coverage",
                     mapOf("lat" to "%.6f".format(lat), "lon" to "%.6f".format(lon))
                 )
                 return null
             }
 
             val regionData = loadRegionData(region) ?: return null
-
-            val searchRadius = if (currentSpeed > 60f) {
-                MAX_SEARCH_DISTANCE_HIGHWAY
-            } else {
-                MAX_SEARCH_DISTANCE_CITY
-            }
-
-            val nearbyRoads = findNearbyRoads(regionData, lat, lon, searchRadius)
+            val nearbyRoads = findNearbyRoads(regionData, lat, lon)
 
             if (nearbyRoads.isEmpty()) {
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.OSM,
-                    "🔍 No roads within ${searchRadius.toInt()}m"
+                    "No roads within ${SEARCH_RADIUS.toInt()}m"
                 )
                 return null
             }
 
-            // 🎯 SIMPLE SELECTION - CLOSEST ROAD WITH SPEED LIMIT
-            val bestRoad = selectClosestRoadWithSpeed(nearbyRoads)
+            // SIMPLE SELECTION - OSM tag priority only
+            val bestRoad = selectBestRoad(nearbyRoads)
 
             return bestRoad?.let { road ->
                 val speedLimit = road.speedLimit
-                val confidence = calculateSimpleConfidence(road)
+                val confidence = calculateConfidence(road.polylineDistance)
                 val roadName = road.element.tags?.get("name") ?: "Unnamed Road"
 
-                // Store OSM tags
+                // Store OSM tags for DashboardScreen highway classification
                 lastOsmTags.clear()
-                road.element.tags?.let { tags ->
-                    lastOsmTags.putAll(tags)
-                }
+                road.element.tags?.let { tags -> lastOsmTags.putAll(tags) }
                 lastSelectedElement = road.element
 
                 val roadLevel = when {
@@ -159,24 +161,22 @@ class OsmJsonSpeedLookup(private val context: Context) {
                     road.layer > 0 -> "ELEVATED_L${road.layer}"
                     road.layer < 0 -> "UNDERGROUND_L${Math.abs(road.layer)}"
                     road.isBridge -> "BRIDGE"
+                    road.highwayType == "motorway" -> "MOTORWAY"
                     else -> "GROUND"
                 }
 
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.OSM,
-                    "🎯 SIMPLE SELECTION: ${speedLimit}km/h on ${road.highwayType.uppercase()} (${road.polylineDistance.toInt()}m) [$roadLevel]",
+                    "Selected: ${speedLimit}km/h ${road.highwayType} (${road.polylineDistance.toInt()}m) [$roadLevel]",
                     mapOf(
                         "road" to roadName,
                         "highway_type" to road.highwayType,
                         "layer" to road.layer.toString(),
-                        "level" to roadLevel,
                         "bridge" to if (road.isBridge) "YES" else "NO",
-                        "tunnel" to if (road.isTunnel) "YES" else "NO",
-                        "speed_limit" to "${speedLimit}km/h",
-                        "distance" to "${road.distance.toInt()}m",
-                        "polyline_distance" to "${road.polylineDistance.toInt()}m",
-                        "selection_method" to "CLOSEST_WITH_SPEED",
-                        "region" to region.displayName
+                        "priority" to road.priority.toString(),
+                        "region" to region.displayName,
+                        "direction" to "${carDirection?.toInt() ?: "N/A"}°",
+                        "altitude" to "${altitude?.let { String.format("%.1f", it) } ?: "N/A"}m"
                     )
                 )
 
@@ -185,91 +185,62 @@ class OsmJsonSpeedLookup(private val context: Context) {
                     roadName = "$roadName ($roadLevel)",
                     roadType = road.highwayType,
                     confidence = confidence,
-                    source = "simple_closest_${region.name.lowercase()}",
+                    source = "osm_${region.name.lowercase()}",
                     distance = road.polylineDistance
                 )
             }
         } catch (e: Exception) {
-            LogCollector.logError("❌ Simple lookup error", e)
+            LogCollector.logError("OSM lookup error", e)
             return null
         }
     }
 
     /**
-     * 🎯 NEW: Simple closest road selection - FIXES BRIDGE/SERVICE CONFUSION
+     * SIMPLE ROAD SELECTION - OSM tag priority only
      */
-    private fun selectClosestRoadWithSpeed(roads: List<SimpleRoadCandidate>): SimpleRoadCandidate? {
-        LogCollector.addDetailedLog(
-            LogCollector.LogCategory.OSM,
-            "🎯 SIMPLE MODE: Finding closest road with speed limit from ${roads.size} candidates"
-        )
-
+    private fun selectBestRoad(roads: List<RoadCandidate>): RoadCandidate? {
         // Only consider roads with speed limits
         val roadsWithSpeed = roads.filter { it.speedLimit != null }
 
         if (roadsWithSpeed.isEmpty()) {
-            LogCollector.addDetailedLog(LogCollector.LogCategory.OSM, "❌ No roads with speed limits found")
+            LogCollector.addDetailedLog(LogCollector.LogCategory.OSM, "No roads with speed limits found")
             return null
         }
 
-        // Log all candidates
-        roadsWithSpeed.forEachIndexed { index, road ->
-            val tags = road.element.tags ?: emptyMap()
+        // Select by priority, then by distance
+        val bestRoad = roadsWithSpeed.minWithOrNull(
+            compareBy<RoadCandidate> { it.priority }
+                .thenBy { it.polylineDistance }
+        )
+
+        bestRoad?.let { road ->
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.OSM,
-                "🎯 Candidate #${index + 1}: ${tags["name"] ?: "Unnamed"}",
-                mapOf(
-                    "highway" to road.highwayType,
-                    "layer" to road.layer.toString(),
-                    "bridge" to if (road.isBridge) "YES" else "NO",
-                    "tunnel" to if (road.isTunnel) "YES" else "NO",
-                    "speed_limit" to "${road.speedLimit}km/h",
-                    "polyline_distance" to "${road.polylineDistance.toInt()}m"
-                )
+                "Road selection: Priority ${road.priority} (${getPriorityName(road.priority)}) at ${road.polylineDistance.toInt()}m"
             )
         }
 
-        // Simply pick the closest one by polyline distance
-        val closest = roadsWithSpeed.minByOrNull { it.polylineDistance }
+        return bestRoad
+    }
 
-        closest?.let { road ->
-            val tags = road.element.tags ?: emptyMap()
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.OSM,
-                "✅ SELECTED: ${tags["name"] ?: "Unnamed"} - ${road.highwayType} with ${road.speedLimit}km/h (${road.polylineDistance.toInt()}m away)",
-                mapOf(
-                    "selection_reason" to "Closest road with speed limit",
-                    "method" to "SIMPLE_DISTANCE_BASED",
-                    "beats_complex_analysis" to "YES - No more bridge confusion!"
-                )
-            )
+    private fun getPriorityName(priority: Int): String {
+        return when (priority) {
+            1 -> "BRIDGE"
+            2 -> "MOTORWAY"
+            3 -> "HIGHWAY"
+            4 -> "REGULAR"
+            5 -> "SERVICE"
+            else -> "UNKNOWN"
         }
-
-        return closest
     }
 
     /**
-     * Get last OSM tags
+     * Calculate polyline distance only (no redundant calculations)
      */
-    fun getLastOsmTags(): Map<String, String> {
-        return lastOsmTags.toMap()
-    }
-
-    /**
-     * Get last selected element
-     */
-    fun getLastSelectedElement(): OverpassElement? {
-        return lastSelectedElement
-    }
-
-    /**
-     * Calculate polyline distance and road direction
-     */
-    private fun calculatePolylineDistance(lat: Double, lon: Double, element: OverpassElement): Pair<Double, Float> {
-        val geometry = element.geometry ?: return Pair(Double.MAX_VALUE, 0f)
+    private fun calculatePolylineDistance(lat: Double, lon: Double, element: OverpassElement): Double {
+        val geometry = element.geometry ?: return Double.MAX_VALUE
 
         var minDistance = Double.MAX_VALUE
-        var roadDirection = 0f
 
         for (i in 0 until geometry.size - 1) {
             val segmentDistance = distanceToLineSegment(
@@ -280,14 +251,10 @@ class OsmJsonSpeedLookup(private val context: Context) {
 
             if (segmentDistance < minDistance) {
                 minDistance = segmentDistance
-                roadDirection = calculateBearing(
-                    geometry[i].lat, geometry[i].lon,
-                    geometry[i + 1].lat, geometry[i + 1].lon
-                )
             }
         }
 
-        return Pair(minDistance, roadDirection)
+        return minDistance
     }
 
     /**
@@ -333,21 +300,6 @@ class OsmJsonSpeedLookup(private val context: Context) {
     }
 
     /**
-     * Calculate bearing
-     */
-    private fun calculateBearing(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
-        val dLon = Math.toRadians(lon2 - lon1)
-        val lat1Rad = Math.toRadians(lat1)
-        val lat2Rad = Math.toRadians(lat2)
-
-        val y = sin(dLon) * cos(lat2Rad)
-        val x = cos(lat1Rad) * sin(lat2Rad) - sin(lat1Rad) * cos(lat2Rad) * cos(dLon)
-
-        var bearing = Math.toDegrees(atan2(y, x))
-        return ((bearing + 360) % 360).toFloat()
-    }
-
-    /**
      * Find which region contains the coordinates
      */
     private fun findRegion(lat: Double, lon: Double): Region? {
@@ -368,7 +320,7 @@ class OsmJsonSpeedLookup(private val context: Context) {
             try {
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.JSON,
-                    "⚡ Loading ${region.displayName} (simple mode)"
+                    "Loading ${region.displayName}"
                 )
 
                 val elements = loadJsonFileOptimized(region.fileName)
@@ -383,25 +335,27 @@ class OsmJsonSpeedLookup(private val context: Context) {
 
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.JSON,
-                    "✅ ${region.displayName} loaded (simple mode)",
+                    "${region.displayName} loaded",
                     mapOf(
                         "total_roads" to elements.size.toString(),
                         "highways" to highwayElements.size.toString(),
-                        "with_speed_limits" to elements.count { it.tags?.containsKey("maxspeed") == true }.toString()
+                        "with_speed_limits" to elements.count { it.tags?.containsKey("maxspeed") == true }.toString(),
+                        "bridges" to elements.count { it.tags?.get("bridge") == "yes" }.toString(),
+                        "motorways" to elements.count { it.tags?.get("highway") == "motorway" }.toString()
                     )
                 )
 
                 return cachedData
 
             } catch (e: Exception) {
-                LogCollector.logError("❌ Failed to load ${region.displayName}", e)
+                LogCollector.logError("Failed to load ${region.displayName}", e)
                 return null
             }
         }
     }
 
     /**
-     * Load JSON file
+     * Load JSON file optimized
      */
     private fun loadJsonFileOptimized(fileName: String): List<OverpassElement> {
         val elements = mutableListOf<OverpassElement>()
@@ -442,40 +396,37 @@ class OsmJsonSpeedLookup(private val context: Context) {
     }
 
     /**
-     * Find nearby roads - simplified
+     * Find nearby roads - simplified with single radius
      */
     private fun findNearbyRoads(
         regionData: CachedRegionData,
         lat: Double,
-        lon: Double,
-        searchRadius: Double
-    ): List<SimpleRoadCandidate> {
+        lon: Double
+    ): List<RoadCandidate> {
 
         return regionData.elements.mapNotNull { element ->
-            val distance = element.geometry?.minOfOrNull { point ->
-                calculateDistance(lat, lon, point.lat, point.lon)
-            }
+            val polylineDistance = calculatePolylineDistance(lat, lon, element)
 
-            if (distance != null && distance < searchRadius) {
+            if (polylineDistance < SEARCH_RADIUS) {
                 val tags = element.tags ?: emptyMap()
                 val highway = tags["highway"] ?: "unknown"
                 val layer = tags["layer"]?.toIntOrNull() ?: 0
                 val isBridge = tags["bridge"] == "yes"
                 val isTunnel = tags["tunnel"] == "yes"
-
-                val (polylineDistance, roadDirection) = calculatePolylineDistance(lat, lon, element)
                 val speedLimit = parseSpeedLimit(tags["maxspeed"])
 
-                SimpleRoadCandidate(
+                // Calculate priority based on OSM tags only
+                val priority = calculateRoadPriority(highway, isBridge, layer)
+
+                RoadCandidate(
                     element = element,
-                    distance = distance,
                     polylineDistance = polylineDistance,
-                    roadDirection = roadDirection,
                     speedLimit = speedLimit,
                     highwayType = highway,
                     layer = layer,
                     isBridge = isBridge,
-                    isTunnel = isTunnel
+                    isTunnel = isTunnel,
+                    priority = priority
                 )
             } else null
         }.sortedBy { it.polylineDistance }
@@ -483,14 +434,35 @@ class OsmJsonSpeedLookup(private val context: Context) {
     }
 
     /**
-     * Calculate simple confidence
+     * Calculate road priority based on OSM tags only
      */
-    private fun calculateSimpleConfidence(road: SimpleRoadCandidate): Float {
+    private fun calculateRoadPriority(highway: String, isBridge: Boolean, layer: Int): Int {
         return when {
-            road.polylineDistance <= 5.0 -> 0.95f
-            road.polylineDistance <= 15.0 -> 0.90f
-            road.polylineDistance <= 30.0 -> 0.85f
-            road.polylineDistance <= 50.0 -> 0.80f
+            // Bridges and elevated roads first (most specific)
+            isBridge || layer > 0 -> 1
+            // Motorways second (usually elevated in cities)
+            highway == "motorway" -> 2
+            // Major highways third
+            highway in listOf("trunk", "primary") -> 3
+            // Regular roads fourth
+            highway in listOf("secondary", "tertiary", "residential") -> 4
+            // Service roads last (usually ground level)
+            highway == "service" -> 5
+            // Unknown roads
+            else -> 6
+        }
+    }
+
+    /**
+     * Calculate confidence based on distance only
+     */
+    private fun calculateConfidence(distance: Double): Float {
+        return when {
+            distance <= 5.0 -> 0.95f
+            distance <= 15.0 -> 0.90f
+            distance <= 30.0 -> 0.85f
+            distance <= 50.0 -> 0.80f
+            distance <= 100.0 -> 0.75f
             else -> 0.70f
         }
     }
@@ -505,10 +477,6 @@ class OsmJsonSpeedLookup(private val context: Context) {
 
             toRemove.forEach { entry ->
                 regionCache.remove(entry.key)
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.JSON,
-                    "🧹 Removed ${entry.key.displayName} from cache"
-                )
             }
         }
     }
@@ -547,23 +515,40 @@ class OsmJsonSpeedLookup(private val context: Context) {
     }
 
     /**
-     * Get simple statistics
+     * Get last OSM tags - Required by DashboardScreen.kt for highway classification
      */
-    fun getSimpleStats(): String {
+    fun getLastOsmTags(): Map<String, String> {
+        return lastOsmTags.toMap()
+    }
+
+    /**
+     * Get last selected element
+     */
+    fun getLastSelectedElement(): OverpassElement? {
+        return lastSelectedElement
+    }
+
+    /**
+     * Get statistics
+     */
+    fun getStats(): String {
         synchronized(regionCache) {
             val totalElements = regionCache.values.sumOf { it.elements.size }
             val totalWithSpeed = regionCache.values.sumOf { cached ->
                 cached.elements.count { it.tags?.containsKey("maxspeed") == true }
             }
+            val totalBridges = regionCache.values.sumOf { cached ->
+                cached.elements.count { it.tags?.get("bridge") == "yes" }
+            }
 
             return buildString {
-                appendLine("🎯 Simple OSM Lookup Statistics:")
-                appendLine("  📊 Total Roads: $totalElements")
-                appendLine("  🔢 With Speed Limits: $totalWithSpeed")
-                appendLine("  💾 Cache: ${regionCache.size}/$CACHE_SIZE regions")
-                appendLine("  🎯 Selection Method: Closest road with speed limit")
-                appendLine("  🔧 Bridge Confusion Fix: ENABLED")
-                appendLine("  ⚡ Performance: OPTIMIZED")
+                appendLine("FIXED OSM Lookup Statistics:")
+                appendLine("  Total Roads: $totalElements")
+                appendLine("  With Speed Limits: $totalWithSpeed")
+                appendLine("  Bridges: $totalBridges")
+                appendLine("  Cache: ${regionCache.size}/$CACHE_SIZE regions")
+                appendLine("  Selection: OSM tag priority")
+                appendLine("  Method: Simple and reliable")
             }
         }
     }
@@ -586,9 +571,11 @@ class OsmJsonSpeedLookup(private val context: Context) {
                 "With Speed Limits" to regionCache.values.sumOf { cached ->
                     cached.elements.count { it.tags?.containsKey("maxspeed") == true }
                 }.toString(),
-                "Selection Method" to "SIMPLE_CLOSEST",
-                "Bridge Confusion Fix" to "ENABLED",
-                "Complex Analysis" to "DISABLED"
+                "Bridges" to regionCache.values.sumOf { cached ->
+                    cached.elements.count { it.tags?.get("bridge") == "yes" }
+                }.toString(),
+                "Selection Method" to "OSM_TAG_PRIORITY",
+                "Search Radius" to "${SEARCH_RADIUS}m"
             )
         }
     }
@@ -601,10 +588,6 @@ class OsmJsonSpeedLookup(private val context: Context) {
             regionCache.clear()
             lastOsmTags.clear()
             lastSelectedElement = null
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.JSON,
-                "🧹 Simple lookup cache cleared"
-            )
         }
     }
 

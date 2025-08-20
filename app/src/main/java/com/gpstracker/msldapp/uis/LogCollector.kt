@@ -151,35 +151,97 @@ object LogCollector {
     }
 
     /**
-     * Log OSM speed limit lookups
+     * FIXED: Log OSM speed limit lookups - Generic approach to avoid type resolution issues
      */
     fun logOSMSpeedLookup(lat: Double, lon: Double, result: Any?) {
         osmLookupCount++
 
-        when (result) {
-            is OsmOfflineSpeedLookup.SpeedLimitInfo -> {
+        if (result != null) {
+            try {
+                // Try to extract common properties using reflection
+                val resultClass = result.javaClass
+                var speedLimit: Any? = null
+                var roadName: Any? = null
+                var source: Any? = null
+
+                // Try to get speedLimit property
+                try {
+                    val speedLimitField = resultClass.getDeclaredField("speedLimit")
+                    speedLimitField.isAccessible = true
+                    speedLimit = speedLimitField.get(result)
+                } catch (e: Exception) {
+                    // Ignore if field doesn't exist
+                }
+
+                // Try to get roadName property
+                try {
+                    val roadNameField = resultClass.getDeclaredField("roadName")
+                    roadNameField.isAccessible = true
+                    roadName = roadNameField.get(result)
+                } catch (e: Exception) {
+                    // Ignore if field doesn't exist
+                }
+
+                // Try to get source property
+                try {
+                    val sourceField = resultClass.getDeclaredField("source")
+                    sourceField.isAccessible = true
+                    source = sourceField.get(result)
+                } catch (e: Exception) {
+                    // Ignore if field doesn't exist
+                }
+
                 addDetailedLog(
                     LogCategory.OSM,
                     "OSM Lookup #$osmLookupCount",
                     mapOf(
                         "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
-                        "Result" to "${result.speedLimit ?: "No data"} km/h",
-                        "Road" to (result.roadName ?: "Unknown"),
-                        "Source" to result.source
+                        "Result" to "${speedLimit ?: "No data"} km/h",
+                        "Road" to (roadName?.toString() ?: "Unknown"),
+                        "Source" to (source?.toString() ?: "OSM"),
+                        "Type" to resultClass.simpleName
                     )
                 )
-            }
-            else -> {
+            } catch (e: Exception) {
+                // Fallback if reflection fails
                 addDetailedLog(
                     LogCategory.OSM,
                     "OSM Lookup #$osmLookupCount",
                     mapOf(
                         "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
-                        "Result" to "No data"
+                        "Result" to "Data found",
+                        "Type" to result.javaClass.simpleName
                     )
                 )
             }
+        } else {
+            addDetailedLog(
+                LogCategory.OSM,
+                "OSM Lookup #$osmLookupCount",
+                mapOf(
+                    "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
+                    "Result" to "No data"
+                )
+            )
         }
+    }
+
+    /**
+     * FIXED: Alternative simpler version of OSM lookup logging
+     */
+    fun logOSMSpeedLookupSimple(lat: Double, lon: Double, speedLimit: Int?, roadName: String?, source: String?) {
+        osmLookupCount++
+
+        addDetailedLog(
+            LogCategory.OSM,
+            "OSM Lookup #$osmLookupCount",
+            mapOf(
+                "Location" to "${String.format("%.6f", lat)}, ${String.format("%.6f", lon)}",
+                "Result" to "${speedLimit ?: "No data"} km/h",
+                "Road" to (roadName ?: "Unknown"),
+                "Source" to (source ?: "OSM")
+            )
+        )
     }
 
     /**
@@ -242,7 +304,7 @@ object LogCollector {
     fun getPerformanceSummary(): String {
         val stats = getSystemStats()
         return buildString {
-            appendLine("📊 PERFORMANCE SUMMARY:")
+            appendLine("Performance Summary:")
             appendLine("• GPS Updates: ${stats["GPS Updates"]}")
             appendLine("• OSM Lookups: ${stats["OSM Lookups"]}")
             appendLine("• TTL Sends: ${stats["TTL Sends"]}")
