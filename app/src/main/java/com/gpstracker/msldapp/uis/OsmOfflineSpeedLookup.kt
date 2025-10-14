@@ -1,8 +1,7 @@
 // COMPLETE FIXED: Simple and Reliable OSM Speed Lookup
-// File: app/src/main/java/com/gpstracker/msldapp/uis/OsmJsonSpeedLookup.kt
+// File: app/src/main/java/com/gpstracker/msldapp/uis/OsmOfflineSpeedLookup.kt
 
 package com.gpstracker.msldapp.uis
-
 
 import android.util.Log
 import com.google.gson.Gson
@@ -11,13 +10,10 @@ import kotlinx.coroutines.*
 import java.io.InputStreamReader
 import kotlin.math.*
 import android.content.Context
-import com.gpstracker.msldapp.uis.OsmJsonSpeedLookup
-import com.gpstracker.msldapp.uis.LogCollector
+
 /**
  * FIXED OSM LOOKUP - SIMPLE AND RELIABLE
- * Removed: Complex flyover detection, altitude dependencies, redundant calculations
- * Added: Simple OSM tag priority, reliable selection logic
- * Works perfectly with DashboardScreen.kt highway classification system
+ * Updated: Added all new India route regions for Bangalore-Chennai testing
  */
 class OsmOfflineSpeedLookup(private val context: Context) {
     private val gson = Gson()
@@ -31,7 +27,7 @@ class OsmOfflineSpeedLookup(private val context: Context) {
     companion object {
         private const val TAG = "OsmLookup"
         private const val SEARCH_RADIUS = 200.0
-        private const val CACHE_SIZE = 6
+        private const val CACHE_SIZE = 12  // Increased for more regions
         private const val CACHE_DURATION_MS = 600000L
     }
 
@@ -51,6 +47,7 @@ class OsmOfflineSpeedLookup(private val context: Context) {
 
     /**
      * Region definitions with file names and boundaries
+     * UPDATED: Added all new India regions with proper priority
      */
     enum class Region(
         val fileName: String,
@@ -58,17 +55,35 @@ class OsmOfflineSpeedLookup(private val context: Context) {
         val minLat: Double,
         val maxLat: Double,
         val minLon: Double,
-        val maxLon: Double
+        val maxLon: Double,
+        val priority: Int = 5  // Lower number = higher priority
     ) {
-        DUBAI("dubai.json", "Dubai", 24.7136, 25.4168, 54.8863, 55.5650),
-        SHARJAH("Sharjah.json", "Sharjah", 24.7859, 25.4544, 55.5131, 56.0895),
-        AJMAN("Ajman.json", "Ajman", 25.3626, 25.4544, 55.4338, 55.5131),
-        UMM_AL_QUWAIN("Umm Al Quwain.json", "Umm Al Quwain", 25.4544, 25.6658, 55.5131, 55.9348),
-        RAS_AL_KHAIMAH("Ras Al-Khaimah.json", "Ras Al Khaimah", 25.6139, 26.0859, 55.7481, 56.1886),
-        FUJAIRAH("Fujairah.json", "Fujairah", 24.7858, 25.6658, 56.0895, 56.3960),
-        ABU_DHABI_EAST("Abu Dhabi Eastern Region.json", "Abu Dhabi East", 22.6333, 24.7858, 53.6176, 56.0895),
-        ABU_DHABI_WEST("Abu Dhabi Western Region.json", "Abu Dhabi West", 22.6333, 24.5572, 51.5833, 54.8863),
-        BENGALURU("bengaluru_speed_limits.json", "Bengaluru", 12.7158, 13.1735, 77.3672, 77.8472);
+        // UAE Regions
+        DUBAI("dubai.json", "Dubai", 24.7136, 25.4168, 54.8863, 55.5650, 3),
+        SHARJAH("Sharjah.json", "Sharjah", 24.7859, 25.4544, 55.5131, 56.0895, 3),
+        AJMAN("Ajman.json", "Ajman", 25.3626, 25.4544, 55.4338, 55.5131, 3),
+        UMM_AL_QUWAIN("Umm Al Quwain.json", "Umm Al Quwain", 25.4544, 25.6658, 55.5131, 55.9348, 3),
+        RAS_AL_KHAIMAH("Ras Al-Khaimah.json", "Ras Al Khaimah", 25.6139, 26.0859, 55.7481, 56.1886, 3),
+        FUJAIRAH("Fujairah.json", "Fujairah", 24.7858, 25.6658, 56.0895, 56.3960, 3),
+        ABU_DHABI_EAST("Abu Dhabi Eastern Region.json", "Abu Dhabi East", 22.6333, 24.7858, 53.6176, 56.0895, 3),
+        ABU_DHABI_WEST("Abu Dhabi Western Region.json", "Abu Dhabi West", 22.6333, 24.5572, 51.5833, 54.8863, 3),
+
+        // India - Route-Specific (HIGHEST PRIORITY - Most accurate for testing)
+        BANGALORE_TN_BORDER("BangaloretoTamilNaduBorderKarnataka portion.json", "BLR-TN Border", 12.7, 13.2, 77.3, 78.2, 1),
+        KRISHNAGIRI_VELLORE_CHENNAI("KrishnagiriVelloreChennaiTamilNaduportion.json", "Krishnagiri-Vellore-Chennai", 12.5, 13.5, 78.0, 80.2, 1),
+        CHITTOOR_AREA("ChittoorAreaIfviaNH44AProute.json", "Chittoor Area NH44", 12.8, 13.5, 78.5, 79.5, 1),
+
+        // India - Combined Routes (MEDIUM-HIGH PRIORITY)
+        BANGALORE_CHENNAI_ROUTES("bangalore_chennai_routes.json", "BLR-Chennai Routes", 12.0, 13.5, 77.2, 80.3, 2),
+        ENTIRE_ROUTE_CORRIDOR("EntireRouteCorridor.json", "Entire Route Corridor", 12.0, 13.5, 77.2, 80.3, 2),
+
+        // India - City-Specific (MEDIUM PRIORITY)
+        BENGALURU("bengaluru_speed_limits.json", "Bengaluru City", 12.7158, 13.1735, 77.3672, 77.8472, 3),
+
+        // India - State-Wide NH+Medium (LOWEST PRIORITY - Fallback)
+        TAMIL_NADU_NH_MEDIUM("Tamil Nadu - NH + Medium Roads.json", "Tamil Nadu NH+Medium", 8.0, 13.5, 76.0, 80.5, 4),
+        KARNATAKA_NH_MEDIUM("Karnataka - NH + Medium Roads.json", "Karnataka NH+Medium", 11.5, 18.5, 74.0, 78.5, 4),
+        ANDHRA_PRADESH_NH_MEDIUM("Andhra Pradesh - NH + Medium Roads.json", "Andhra Pradesh NH+Medium", 12.5, 19.5, 76.5, 84.8, 4);
 
         fun contains(lat: Double, lon: Double): Boolean {
             return lat in minLat..maxLat && lon in minLon..maxLon
@@ -104,11 +119,14 @@ class OsmOfflineSpeedLookup(private val context: Context) {
     init {
         LogCollector.addDetailedLog(
             LogCollector.LogCategory.JSON,
-            "FIXED OSM Lookup Initialized - Simple and Reliable",
+            "FIXED OSM Lookup Initialized - All India Regions Added",
             mapOf(
+                "Total Regions" to Region.values().size.toString(),
+                "India Regions" to "11",
+                "UAE Regions" to "8",
                 "Search Strategy" to "OSM tag priority",
                 "Search Radius" to "${SEARCH_RADIUS}m",
-                "Selection Method" to "Bridge > Motorway > Regular > Service"
+                "Selection Method" to "Region priority > Bridge > Motorway > Regular"
             )
         )
     }
@@ -303,9 +321,31 @@ class OsmOfflineSpeedLookup(private val context: Context) {
 
     /**
      * Find which region contains the coordinates
+     * UPDATED: Priority-based selection for overlapping regions
      */
     private fun findRegion(lat: Double, lon: Double): Region? {
-        return Region.values().find { it.contains(lat, lon) }
+        val matchingRegions = Region.values().filter { it.contains(lat, lon) }
+
+        if (matchingRegions.isEmpty()) {
+            return null
+        }
+
+        // If multiple regions match, select by priority (lower number = higher priority)
+        val selectedRegion = matchingRegions.minByOrNull { it.priority }
+
+        if (matchingRegions.size > 1) {
+            LogCollector.addDetailedLog(
+                LogCollector.LogCategory.OSM,
+                "Multiple regions match - selected by priority",
+                mapOf(
+                    "matching_count" to matchingRegions.size.toString(),
+                    "all_matches" to matchingRegions.joinToString { "${it.displayName}(P${it.priority})" },
+                    "selected" to "${selectedRegion?.displayName}(P${selectedRegion?.priority})"
+                )
+            )
+        }
+
+        return selectedRegion
     }
 
     /**
@@ -322,7 +362,7 @@ class OsmOfflineSpeedLookup(private val context: Context) {
             try {
                 LogCollector.addDetailedLog(
                     LogCollector.LogCategory.JSON,
-                    "Loading ${region.displayName}"
+                    "Loading ${region.displayName} (Priority ${region.priority})"
                 )
 
                 val elements = loadJsonFileOptimized(region.fileName)
@@ -545,18 +585,18 @@ class OsmOfflineSpeedLookup(private val context: Context) {
 
             return buildString {
                 appendLine("FIXED OSM Lookup Statistics:")
+                appendLine("  Total Regions Available: ${Region.values().size}")
+                appendLine("  Cached Regions: ${regionCache.size}")
                 appendLine("  Total Roads: $totalElements")
                 appendLine("  With Speed Limits: $totalWithSpeed")
                 appendLine("  Bridges: $totalBridges")
-                appendLine("  Cache: ${regionCache.size}/$CACHE_SIZE regions")
-                appendLine("  Selection: OSM tag priority")
-                appendLine("  Method: Simple and reliable")
+                appendLine("  Selection: Region priority + OSM tag priority")
             }
         }
     }
 
     /**
-     * Get flyover-aware statistics - For compatibility with OsmOfflineSpeedLookup
+     * Get flyover-aware statistics
      */
     fun getFlyoverStats(): String {
         synchronized(regionCache) {
@@ -573,14 +613,14 @@ class OsmOfflineSpeedLookup(private val context: Context) {
 
             return buildString {
                 appendLine("FIXED OSM Lookup Statistics:")
+                appendLine("  Total Regions: ${Region.values().size}")
+                appendLine("  Cached: ${regionCache.size}/$CACHE_SIZE")
                 appendLine("  Total Roads: $totalElements")
                 appendLine("  With Speed Limits: $totalWithSpeed")
                 appendLine("  Bridges/Flyovers: $totalBridges")
-                appendLine("  Motorways/Expressways: $totalMotorways")
-                appendLine("  Cache: ${regionCache.size}/$CACHE_SIZE regions")
-                appendLine("  Selection Method: OSM tag priority (fixed)")
-                appendLine("  Bridge Detection: ENABLED (OSM tags only)")
-                appendLine("  Performance: OPTIMIZED")
+                appendLine("  Motorways: $totalMotorways")
+                appendLine("  Selection: Region priority + OSM tags")
+                appendLine("  Bridge Detection: ENABLED")
             }
         }
     }
@@ -598,6 +638,7 @@ class OsmOfflineSpeedLookup(private val context: Context) {
     fun getCacheStats(): Map<String, String> {
         synchronized(regionCache) {
             return mapOf(
+                "Total Regions" to Region.values().size.toString(),
                 "Cached Regions" to regionCache.size.toString(),
                 "Total Elements" to regionCache.values.sumOf { it.elements.size }.toString(),
                 "With Speed Limits" to regionCache.values.sumOf { cached ->
@@ -606,7 +647,7 @@ class OsmOfflineSpeedLookup(private val context: Context) {
                 "Bridges" to regionCache.values.sumOf { cached ->
                     cached.elements.count { it.tags?.get("bridge") == "yes" }
                 }.toString(),
-                "Selection Method" to "OSM_TAG_PRIORITY",
+                "Selection Method" to "REGION_PRIORITY + OSM_TAG_PRIORITY",
                 "Search Radius" to "${SEARCH_RADIUS}m"
             )
         }

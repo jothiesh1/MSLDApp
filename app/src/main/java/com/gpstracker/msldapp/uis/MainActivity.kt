@@ -18,6 +18,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
@@ -29,6 +31,9 @@ import com.hoho.android.usbserial.driver.UsbSerialProber
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -36,24 +41,21 @@ class MainActivity : ComponentActivity() {
     private var usbAttachReceiver: BroadcastReceiver? = null
     private var usbDetachReceiver: BroadcastReceiver? = null
 
-    // Use unique action string to avoid conflicts
-    private val ACTION_USB_PERMISSION = "${packageName}.USB_PERMISSION"
-
-    // Retry mechanism
-
+    private val ACTION_USB_PERMISSION = "com.gpstracker.msldapp.USB_PERMISSION"
 
     private var ttlInitRetryCount = 0
     private val maxTtlRetries = 3
     private val ttlRetryDelayMs = 2000L
 
-    // Reference to OSM lookup for cleanup
     private var osmJsonSpeedLookup: OsmJsonSpeedLookup? = null
 
-    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+    @RequiresApi(Build.VERSION_CODES.N)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Better error handling for uncaught exceptions
+        // Install splash screen FIRST - before anything else
+        installSplashScreen()
+
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             Log.e("CrashHandler", "Uncaught exception in thread ${thread.name}: ${throwable.message}", throwable)
             LogCollector.logError("App crashed in thread ${thread.name}", throwable as? Exception)
@@ -70,18 +72,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Initialize TTL with retry mechanism
         initializeTtlWithRetry()
-
-        // Start memory monitoring
         startMemoryMonitoring()
     }
 
-    // Memory monitoring function
     private fun startMemoryMonitoring() {
         lifecycleScope.launch {
             while (isActive) {
-                delay(30000) // Check every 30 seconds
+                delay(30000)
 
                 val runtime = Runtime.getRuntime()
                 val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
@@ -99,16 +97,10 @@ class MainActivity : ComponentActivity() {
                     )
                 )
 
-                // Warning if memory usage is high
                 if (percentage > 80) {
                     LogCollector.logError("High memory usage: $percentage%")
-
-                    // Try to clear OSM cache if available
                     osmJsonSpeedLookup?.clearCache()
-
-                    // Force garbage collection
                     System.gc()
-
                     LogCollector.addDetailedLog(
                         LogCollector.LogCategory.BACKEND,
                         "Attempted memory cleanup due to high usage"
@@ -121,7 +113,6 @@ class MainActivity : ComponentActivity() {
     private fun setupUsbReceivers() {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
 
-        // USB permission receiver
         usbPermissionReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 try {
@@ -130,7 +121,7 @@ class MainActivity : ComponentActivity() {
                             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
                         } else {
                             @Suppress("DEPRECATION")
-                            intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                         }
                         val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
 
@@ -144,19 +135,17 @@ class MainActivity : ComponentActivity() {
                         )
 
                         if (granted && device != null) {
-                            Log.i("SerialTtl", "✅ USB permission granted for ${device.deviceName}")
-
-                            // Add delay and retry mechanism
+                            Log.i("SerialTtl", "USB permission granted for ${device.deviceName}")
                             Handler(Looper.getMainLooper()).postDelayed({
                                 initializeTtlConnection()
-                            }, 1000) // Wait 1 second before trying to connect
+                            }, 1000)
                         } else {
-                            Log.e("SerialTtl", "❌ USB permission denied")
+                            Log.e("SerialTtl", "USB permission denied")
                             LogCollector.addDetailedLog(
                                 LogCollector.LogCategory.ERROR,
                                 "USB permission denied"
                             )
-                            Toast.makeText(this@MainActivity, "❌ USB permission denied", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "USB permission denied", Toast.LENGTH_SHORT).show()
                         }
                     }
                 } catch (e: Exception) {
@@ -166,7 +155,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // USB attach receiver
         usbAttachReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 try {
@@ -175,7 +163,7 @@ class MainActivity : ComponentActivity() {
                             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
                         } else {
                             @Suppress("DEPRECATION")
-                            intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                         }
 
                         LogCollector.addDetailedLog(
@@ -188,13 +176,12 @@ class MainActivity : ComponentActivity() {
                             )
                         )
 
-                        Log.i("SerialTtl", "🔌 USB device attached: ${device?.deviceName}")
+                        Log.i("SerialTtl", "USB device attached: ${device?.deviceName}")
 
                         if (device != null) {
                             if (!usbManager.hasPermission(device)) {
                                 requestUsbPermission(device)
                             } else {
-                                // Add delay before trying to connect
                                 Handler(Looper.getMainLooper()).postDelayed({
                                     initializeTtlConnection()
                                 }, 1500)
@@ -208,7 +195,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // USB detach receiver
         usbDetachReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 try {
@@ -217,7 +203,7 @@ class MainActivity : ComponentActivity() {
                             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
                         } else {
                             @Suppress("DEPRECATION")
-                            intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                         }
 
                         LogCollector.addDetailedLog(
@@ -226,12 +212,11 @@ class MainActivity : ComponentActivity() {
                             mapOf("Device" to (device?.deviceName ?: "Unknown"))
                         )
 
-                        Log.i("SerialTtl", "🔌 USB device detached: ${device?.deviceName}")
+                        Log.i("SerialTtl", "USB device detached: ${device?.deviceName}")
 
-                        // Clean up TTL connection
                         try {
                             SerialTtlManager.close()
-                            Toast.makeText(this@MainActivity, "📱 TTL device disconnected", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this@MainActivity, "TTL device disconnected", Toast.LENGTH_SHORT).show()
                         } catch (e: Exception) {
                             LogCollector.logError("Error closing TTL on detach", e)
                         }
@@ -280,7 +265,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Improved TTL initialization with retry
     private fun initializeTtlWithRetry() {
         lifecycleScope.launch {
             repeat(maxTtlRetries) { attempt ->
@@ -290,7 +274,7 @@ class MainActivity : ComponentActivity() {
                         "TTL initialization attempt ${attempt + 1}/$maxTtlRetries"
                     )
 
-                    delay(1000) // Wait before attempting
+                    delay(1000)
 
                     val success = initializeTtlConnection()
                     if (success) {
@@ -312,16 +296,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // All attempts failed
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.ERROR,
                 "TTL initialization failed after $maxTtlRetries attempts"
             )
         }
     }
-
-    // Improved TTL connection initialization
-    // Fixed TTL test in MainActivity.kt - initializeTtlConnection method
 
     private fun initializeTtlConnection(): Boolean {
         return try {
@@ -360,23 +340,22 @@ class MainActivity : ComponentActivity() {
                 )
 
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(this, "✅ TTL Connected", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "TTL Connected", Toast.LENGTH_SHORT).show()
                 }
 
-                // Test connection with a simple command
+                // FIXED: Test with Boolean return instead of Int
                 try {
-                    val bytesWritten = SerialTtlManager.sendSpeed(0, this) // Send 0 as test
+                    val success = SerialTtlManager.sendSpeed(0, this)
 
-                    // Check the return value to confirm bytes were written
-                    if (bytesWritten == 1) {
+                    if (success) {
                         LogCollector.addDetailedLog(
                             LogCollector.LogCategory.BACKEND,
-                            "TTL test command sent successfully: $bytesWritten byte written"
+                            "TTL test command sent successfully"
                         )
                     } else {
                         LogCollector.addDetailedLog(
                             LogCollector.LogCategory.BACKEND,
-                            "TTL test command partially successful: $bytesWritten bytes written"
+                            "TTL test command failed"
                         )
                     }
                 } catch (e: Exception) {
@@ -389,7 +368,7 @@ class MainActivity : ComponentActivity() {
                 )
 
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(this, "❌ TTL connection failed", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "TTL connection failed", Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -397,12 +376,12 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             LogCollector.logError("TTL connection error", e)
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(this, "❌ TTL error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "TTL error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
             false
         }
     }
-    // Improved USB permission request
+
     private fun requestUsbPermission(device: UsbDevice) {
         try {
             val usbManager = getSystemService(USB_SERVICE) as UsbManager
@@ -421,7 +400,7 @@ class MainActivity : ComponentActivity() {
                 mapOf("Device" to device.deviceName)
             )
 
-            Log.w("SerialTtl", "⚠️ Requested USB permission for ${device.deviceName}")
+            Log.w("SerialTtl", "Requested USB permission for ${device.deviceName}")
         } catch (e: Exception) {
             LogCollector.logError("Error requesting USB permission", e)
         }
@@ -430,11 +409,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            // Clean up resources
             unregisterUsbReceivers()
             SerialTtlManager.close()
-
-            // Clean up OSM JSON cache
             osmJsonSpeedLookup?.cleanup()
 
             LogCollector.addDetailedLog(
@@ -454,10 +430,7 @@ class MainActivity : ComponentActivity() {
                 "MainActivity resumed"
             )
 
-            // Check TTL connection status on resume
             checkTtlConnectionStatus()
-
-            // Only request permission if needed and not already requested recently
             tryRequestUsbPermissionIfNeeded()
         } catch (e: Exception) {
             LogCollector.logError("Error in onResume", e)
@@ -476,13 +449,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Better connection status checking
     private fun checkTtlConnectionStatus() {
         try {
             val isConnected = SerialTtlManager.isConnected
-
-            // 🔧 FIXED: Use getSystemStats() instead of getHealthStatus()
-            val healthStatus = SerialTtlManager.getHealthStatus() // This exists in SerialTtlManager
+            val healthStatus = SerialTtlManager.getHealthStatus()
 
             LogCollector.addDetailedLog(
                 LogCollector.LogCategory.BACKEND,
@@ -494,7 +464,6 @@ class MainActivity : ComponentActivity() {
             )
 
             if (!isConnected) {
-                // Try to reconnect after a short delay
                 Handler(Looper.getMainLooper()).postDelayed({
                     initializeTtlWithRetry()
                 }, 2000)
@@ -504,7 +473,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Improved USB permission checking
     private fun tryRequestUsbPermissionIfNeeded() {
         try {
             val usbManager = getSystemService(USB_SERVICE) as UsbManager
@@ -519,12 +487,10 @@ class MainActivity : ComponentActivity() {
                         mapOf("Device" to device.deviceName)
                     )
 
-                    // Add delay to avoid immediate re-request
                     Handler(Looper.getMainLooper()).postDelayed({
                         requestUsbPermission(device)
                     }, 1000)
                 } else {
-                    // Permission already granted, check if we need to reconnect
                     if (!SerialTtlManager.isConnected) {
                         Handler(Looper.getMainLooper()).postDelayed({
                             initializeTtlConnection()
@@ -542,40 +508,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Set OSM lookup reference for cleanup
     fun setOsmJsonSpeedLookup(lookup: OsmJsonSpeedLookup) {
         osmJsonSpeedLookup = lookup
     }
 }
-
-// Updated AppNavigation function - Replace the existing one at the bottom of your MainActivity.kt
-// Updated AppNavigation function - Replace the existing one at the bottom of your MainActivity.kt
-
-@RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Composable
 fun AppNavigation() {
     val navController = rememberNavController()
+    var showSplash by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
         try {
-            Log.d("AppNavigator", "✅ Setting navController")
             AppNavigator.setController(navController)
-
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.INFO,
-                "App navigation initialized with HomeScreen"
-            )
+            LogCollector.addDetailedLog(LogCollector.LogCategory.INFO, "App navigation initialized")
         } catch (e: Exception) {
             LogCollector.logError("Error setting up navigation", e)
         }
     }
 
-    NavHost(navController = navController, startDestination = "home") {  // Changed from "dashboard" to "home"
-        composable("home") {  // Changed from "dashboard" to "home"
-            HomeScreen()  // Changed from DashboardScreen() to HomeScreen()
-        }
-        composable("map") {
-            // LiveHereMapWithAutoLocation()
+    if (showSplash) {
+        SplashScreen(onSplashComplete = {
+            showSplash = false
+        })
+    } else {
+        NavHost(navController = navController, startDestination = "home") {
+            composable("home") { HomeScreen() }
+            composable("map") { }
         }
     }
 }

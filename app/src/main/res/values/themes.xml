@@ -2,4 +2,14 @@
 <resources>
 
     <style name="Theme.MSLDApp" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- Splash Screen Theme -->
+    <style name="Theme.MSLDApp.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@android:color/white</item>
+        <!-- CHANGE THIS LINE - use transparent instead of the icon -->
+        <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        <item name="windowSplashScreenAnimationDuration">300</item>
+        <item name="postSplashScreenTheme">@style/Theme.MSLDApp</item>
+    </style>
+
 </resources>

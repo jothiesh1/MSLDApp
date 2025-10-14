@@ -32,7 +32,6 @@ object SerialTtlManager {
     val ttlLogs = mutableStateListOf<String>()
     var readCallback: (String) -> Unit = {}
 
-    // Better thread safety and state management
     private val _isConnected = AtomicBoolean(false)
     var isConnected: Boolean
         get() = _isConnected.get()
@@ -41,35 +40,29 @@ object SerialTtlManager {
     private val sendAttempts = AtomicInteger(0)
     private val successfulSends = AtomicInteger(0)
 
-    // Faster reconnection control
     private var connectionRetryCount = AtomicInteger(0)
-    private val maxRetries = 5 // Increased back to 5
-    private val baseRetryDelay = 1000L // Reduced delay for faster reconnection
+    private val maxRetries = 5
+    private val baseRetryDelay = 1000L
 
-    // Prevent multiple simultaneous operations
     private val initializationInProgress = AtomicBoolean(false)
     private val permissionRequested = AtomicBoolean(false)
     private val reconnectionInProgress = AtomicBoolean(false)
     private val lastReconnectAttempt = AtomicLong(0)
 
-    // Toast control to prevent spam
     private val lastToastTime = AtomicLong(0)
-    private val toastCooldown = 2000L // Reduced cooldown
+    private val toastCooldown = 2000L
 
     const val ACTION_USB_PERMISSION = "com.gpstracker.msldapp.USB_PERMISSION"
     private var context: Context? = null
     private var isReceiverRegistered = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Connection stability tracking
     private val connectionEstablishedTime = AtomicLong(0)
     private val consecutiveFailures = AtomicInteger(0)
 
-    // Last sent speed limit to avoid duplicates
     private val lastSentSpeedLimit = AtomicInteger(-1)
     private val lastSentTime = AtomicLong(0)
 
-    // Controlled toast showing
     private fun showToast(context: Context, message: String, force: Boolean = false) {
         val currentTime = System.currentTimeMillis()
         if (force || currentTime - lastToastTime.get() > toastCooldown) {
@@ -80,7 +73,6 @@ object SerialTtlManager {
         }
     }
 
-    // Enhanced USB receiver with connection stability
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             try {
@@ -91,7 +83,7 @@ object SerialTtlManager {
                 }
             } catch (e: Exception) {
                 Log.e("SerialTtl", "Error in USB receiver: ${e.message}", e)
-                addLog("❌ USB receiver error: ${e.message}")
+                addLog("USB receiver error: ${e.message}")
             }
         }
     }
@@ -106,18 +98,17 @@ object SerialTtlManager {
             }
 
             val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-            addLog("🔐 USB Permission result: ${if (granted) "GRANTED" else "DENIED"}")
+            addLog("USB Permission: ${if (granted) "GRANTED" else "DENIED"}")
             permissionRequested.set(false)
 
             if (granted && device != null) {
-                addLog("✅ USB permission granted for ${device.deviceName}")
-                // Immediate continue without delay for permission grant
+                addLog("Permission granted for ${device.deviceName}")
                 continueInit(context)
             } else {
-                addLog("❌ USB permission denied")
+                addLog("Permission denied")
                 isConnected = false
                 initializationInProgress.set(false)
-                showToast(context, "❌ USB permission required for TTL", true)
+                showToast(context, "USB permission required for TTL", true)
             }
         }
     }
@@ -130,16 +121,15 @@ object SerialTtlManager {
             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
         }
 
-        Log.i("SerialTtl", "🔌 USB device attached: ${device?.deviceName}")
-        addLog("🔌 USB device attached: ${device?.deviceName}")
+        Log.i("SerialTtl", "USB device attached: ${device?.deviceName}")
+        addLog("USB device attached: ${device?.deviceName}")
 
-        // Auto-reconnect faster
         if (!isConnected && !initializationInProgress.get() && !reconnectionInProgress.get()) {
             mainHandler.postDelayed({
-                if (!isConnected) { // Double check
+                if (!isConnected) {
                     init(context)
                 }
-            }, 500) // Reduced delay
+            }, 500)
         }
     }
 
@@ -151,23 +141,20 @@ object SerialTtlManager {
             intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
         }
 
-        Log.i("SerialTtl", "🔌 USB device detached: ${device?.deviceName}")
-        addLog("🔌 USB device detached: ${device?.deviceName}")
+        Log.i("SerialTtl", "USB device detached: ${device?.deviceName}")
+        addLog("USB device detached: ${device?.deviceName}")
 
-        // Clean disconnect when device is removed
         if (isConnected) {
             cleanupConnection()
-            showToast(context, "📱 TTL device disconnected")
+            showToast(context, "TTL device disconnected")
         }
     }
 
-    // Better initialization with connection stability
     fun init(context: Context): Boolean {
-        Log.i("SerialTtl", "🔍 ===== TTL INITIALIZATION START =====")
+        Log.i("SerialTtl", "===== TTL INITIALIZATION START =====")
 
-        // Prevent multiple simultaneous initializations
         if (!initializationInProgress.compareAndSet(false, true)) {
-            Log.w("SerialTtl", "⚠️ Initialization already in progress, skipping")
+            Log.w("SerialTtl", "Initialization already in progress, skipping")
             return false
         }
 
@@ -176,27 +163,26 @@ object SerialTtlManager {
             isConnected = false
             reconnectionInProgress.set(false)
 
-            // Clean up any existing connections first
             cleanupConnection()
             registerUsbReceivers(context)
 
             val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-            addLog("🔍 Scanning for USB serial devices...")
+            addLog("Scanning for USB serial devices...")
 
             val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-            Log.i("SerialTtl", "🔍 Found ${drivers.size} USB serial drivers")
+            Log.i("SerialTtl", "Found ${drivers.size} USB serial drivers")
 
             if (drivers.isEmpty()) {
-                addLog("❌ No USB serial drivers found")
+                addLog("No USB serial drivers found")
                 initializationInProgress.set(false)
-                showToast(context, "❌ No TTL device found. Connect CP2102 device.")
+                showToast(context, "No TTL device found. Connect CP2102 device.")
                 return false
             }
 
             val driver = drivers[0]
             val device = driver.device
 
-            addLog("🔍 Found USB device: ${device.deviceName} (VID:0x${String.format("%04X", device.vendorId)}, PID:0x${String.format("%04X", device.productId)})")
+            addLog("Found USB device: ${device.deviceName} (VID:0x${String.format("%04X", device.vendorId)}, PID:0x${String.format("%04X", device.productId)})")
 
             if (!usbManager.hasPermission(device)) {
                 return requestUsbPermission(context, usbManager, device)
@@ -205,22 +191,22 @@ object SerialTtlManager {
             return continueInit(context)
 
         } catch (e: Exception) {
-            Log.e("SerialTtl", "❌ Init error: ${e.message}", e)
-            addLog("❌ Init error: ${e.message}")
+            Log.e("SerialTtl", "Init error: ${e.message}", e)
+            addLog("Init error: ${e.message}")
             initializationInProgress.set(false)
-            showToast(context, "❌ TTL init error: ${e.message}")
+            showToast(context, "TTL init error: ${e.message}")
             return false
         }
     }
 
     private fun requestUsbPermission(context: Context, usbManager: UsbManager, device: UsbDevice): Boolean {
         if (!permissionRequested.compareAndSet(false, true)) {
-            Log.w("SerialTtl", "⚠️ Permission request already in progress")
+            Log.w("SerialTtl", "Permission request already in progress")
             return false
         }
 
         try {
-            addLog("⚠️ Requesting USB permission for ${device.deviceName}")
+            addLog("Requesting USB permission for ${device.deviceName}")
 
             val permissionIntent = PendingIntent.getBroadcast(
                 context,
@@ -230,30 +216,29 @@ object SerialTtlManager {
             )
 
             usbManager.requestPermission(device, permissionIntent)
-            addLog("⚠️ Waiting for USB permission...")
-            showToast(context, "⚠️ Please allow USB permission for TTL")
+            addLog("Waiting for USB permission...")
+            showToast(context, "Please allow USB permission for TTL")
             return false
 
         } catch (e: Exception) {
-            Log.e("SerialTtl", "❌ Error requesting USB permission: ${e.message}", e)
-            addLog("❌ Error requesting USB permission: ${e.message}")
+            Log.e("SerialTtl", "Error requesting USB permission: ${e.message}", e)
+            addLog("Error requesting USB permission: ${e.message}")
             permissionRequested.set(false)
             initializationInProgress.set(false)
             return false
         }
     }
 
-    // More robust connection establishment
     private fun continueInit(context: Context): Boolean {
-        Log.i("SerialTtl", "🔍 Continuing TTL initialization...")
-        addLog("🔍 Continuing TTL initialization...")
+        Log.i("SerialTtl", "Continuing TTL initialization...")
+        addLog("Continuing TTL initialization...")
 
         try {
             val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
             val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
 
             if (drivers.isEmpty()) {
-                addLog("❌ No drivers found during continue init")
+                addLog("No drivers found during continue init")
                 initializationInProgress.set(false)
                 return false
             }
@@ -261,60 +246,57 @@ object SerialTtlManager {
             val driver = drivers[0]
             val device = driver.device
 
-            addLog("🔍 Opening USB device connection...")
+            addLog("Opening USB device connection...")
 
             val connection = usbManager.openDevice(device)
             if (connection == null) {
-                addLog("❌ Failed to open USB device connection")
+                addLog("Failed to open USB device connection")
                 initializationInProgress.set(false)
-                showToast(context, "❌ Could not open TTL device")
+                showToast(context, "Could not open TTL device")
                 return false
             }
 
             port = driver.ports.firstOrNull()
             if (port == null) {
-                addLog("❌ No ports found on the TTL device")
+                addLog("No ports found on the TTL device")
                 connection.close()
                 initializationInProgress.set(false)
-                showToast(context, "❌ No TTL port available")
+                showToast(context, "No TTL port available")
                 return false
             }
 
             return configureAndTestPort(context, connection)
 
         } catch (e: Exception) {
-            addLog("❌ Error in continueInit: ${e.message}")
+            addLog("Error in continueInit: ${e.message}")
             initializationInProgress.set(false)
-            showToast(context, "❌ TTL connection failed: ${e.message}")
+            showToast(context, "TTL connection failed: ${e.message}")
             return false
         }
     }
 
-    // Better port configuration with stability checks
     private fun configureAndTestPort(context: Context, connection: android.hardware.usb.UsbDeviceConnection): Boolean {
         return try {
-            addLog("🔍 Configuring serial port parameters...")
+            addLog("Configuring serial port parameters...")
 
             port?.apply {
                 open(connection)
                 setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
                 setDTR(true)
                 setRTS(false)
-                Thread.sleep(50) // Reduced delay
+                Thread.sleep(50)
                 setRTS(true)
             }
 
-            // Mark as connected and reset counters
             isConnected = true
             connectionRetryCount.set(0)
             consecutiveFailures.set(0)
             connectionEstablishedTime.set(System.currentTimeMillis())
             initializationInProgress.set(false)
 
-            addLog("✅ TTL Port configured successfully")
-            showToast(context, "✅ TTL Connected Successfully")
+            addLog("TTL Port configured successfully")
+            showToast(context, "TTL Connected Successfully")
 
-            // Start reading
             startReading()
 
             true
@@ -322,25 +304,22 @@ object SerialTtlManager {
         } catch (e: Exception) {
             isConnected = false
             initializationInProgress.set(false)
-            addLog("❌ Error configuring TTL port: ${e.message}")
-            showToast(context, "❌ TTL configuration failed")
+            addLog("Error configuring TTL port: ${e.message}")
+            showToast(context, "TTL configuration failed")
             false
         }
     }
 
-    // Smart reconnection with faster backoff
     private fun attemptReconnection(context: Context, reason: String) {
         val currentTime = System.currentTimeMillis()
 
-        // Reduced minimum time between reconnection attempts
         if (currentTime - lastReconnectAttempt.get() < 2000) {
-            Log.d("SerialTtl", "🔄 Reconnection attempt too soon, skipping")
+            Log.d("SerialTtl", "Reconnection attempt too soon, skipping")
             return
         }
 
-        // Only one reconnection process at a time
         if (!reconnectionInProgress.compareAndSet(false, true)) {
-            Log.d("SerialTtl", "🔄 Reconnection already in progress")
+            Log.d("SerialTtl", "Reconnection already in progress")
             return
         }
 
@@ -348,22 +327,20 @@ object SerialTtlManager {
         val currentRetryCount = connectionRetryCount.incrementAndGet()
 
         if (currentRetryCount > maxRetries) {
-            addLog("❌ Max reconnection attempts reached")
+            addLog("Max reconnection attempts reached")
             reconnectionInProgress.set(false)
-            showToast(context, "❌ TTL connection failed after $maxRetries attempts")
+            showToast(context, "TTL connection failed after $maxRetries attempts")
             return
         }
 
-        addLog("🔄 Attempting reconnection ($currentRetryCount/$maxRetries) - Reason: $reason")
+        addLog("Attempting reconnection ($currentRetryCount/$maxRetries) - Reason: $reason")
 
-        // Faster progressive delay
         val delay = Math.min(baseRetryDelay * currentRetryCount, 5000L)
         mainHandler.postDelayed({
             cleanupConnection()
 
-            // Small additional delay after cleanup
             mainHandler.postDelayed({
-                if (!isConnected) { // Double check we still need to reconnect
+                if (!isConnected) {
                     init(context)
                 }
                 reconnectionInProgress.set(false)
@@ -371,16 +348,16 @@ object SerialTtlManager {
         }, delay)
     }
 
-    // Better send method with duplicate prevention
-    // Fixed sendSpeed method with proper return type
-
-    // Fix for handling Unit? return type from port?.write()
-    fun sendSpeed(speed: Int, context: Context? = null): Int {
+    /**
+     * FIXED: Send speed to TTL device
+     * Returns: true if successful, false if failed
+     */
+    fun sendSpeed(speed: Int, context: Context? = null): Boolean {
         val attempt = sendAttempts.incrementAndGet()
         val currentTime = System.currentTimeMillis()
 
         try {
-            Log.d("SerialTtl", "🔍 Sending speed: $speed (attempt #$attempt)")
+            Log.d("SerialTtl", "Sending speed: $speed (attempt #$attempt)")
 
             if (speed < 0 || speed > 255) {
                 throw IllegalArgumentException("Speed must be between 0 and 255, got: $speed")
@@ -388,80 +365,84 @@ object SerialTtlManager {
 
             // Check for duplicate sends within 1 second
             if (lastSentSpeedLimit.get() == speed && currentTime - lastSentTime.get() < 1000) {
-                Log.d("SerialTtl", "⚠️ Duplicate speed send skipped: $speed")
-                return 0
+                Log.d("SerialTtl", "Duplicate speed send skipped: $speed")
+                return true // Already sent, count as success
             }
 
-            // Better connection validation
+            // Connection validation
             if (!isConnected || port == null) {
                 throw IllegalStateException("TTL device not connected")
             }
 
-            // Check connection stability (reduced to 500ms)
+            // Check connection stability
             val connectionAge = currentTime - connectionEstablishedTime.get()
             if (connectionAge < 500) {
                 throw IllegalStateException("Connection too new, waiting for stability")
             }
 
             val packet = byteArrayOf(speed.toByte())
-            addLog("📤 Sending: 0x${String.format("%02X", speed)} ($speed)")
+            addLog("Sending: 0x${String.format("%02X", speed)} ($speed)")
 
             val startTime = System.currentTimeMillis()
 
-            // IMPORTANT FIX: Since port?.write() returns Unit? instead of Int
-            // Call write() method separately first
-            port?.write(packet, 1000)
+            // FIXED: Properly handle write operation
+            try {
+                port?.write(packet, 1000)
+                // If we reach here, write succeeded
 
-            // Assume 1 byte was written if no exception occurred
-            val bytesWritten = 1
+                val endTime = System.currentTimeMillis()
 
-            val endTime = System.currentTimeMillis()
+                // Update tracking
+                lastSentSpeedLimit.set(speed)
+                lastSentTime.set(currentTime)
 
-            // Update last sent values
-            lastSentSpeedLimit.set(speed)
-            lastSentTime.set(currentTime)
+                val success = successfulSends.incrementAndGet()
+                consecutiveFailures.set(0)
 
-            val success = successfulSends.incrementAndGet()
-            consecutiveFailures.set(0) // Reset failure counter
+                addLog("TTL SUCCESS #$success: $speed (${endTime - startTime}ms)")
+                context?.let { showToast(it, "TTL: $speed km/h", true) }
 
-            addLog("📤 TTL SUCCESS #$success: $speed (${endTime - startTime}ms)")
-            context?.let { showToast(it, "✅ TTL: $speed", true) } // Force show success
+                Log.d("SerialTtl", "Successfully sent speed: $speed")
+                return true
 
-            return bytesWritten // Return 1 byte written on success
+            } catch (writeException: Exception) {
+                throw IOException("Write failed: ${writeException.message}")
+            }
 
         } catch (e: Exception) {
             val failures = consecutiveFailures.incrementAndGet()
-            addLog("❌ TTL SEND FAILED #$attempt: ${e.message}")
+            addLog("TTL SEND FAILED #$attempt: ${e.message}")
+            Log.e("SerialTtl", "Failed to send speed: ${e.message}", e)
 
-            // Only reconnect on IO errors and if we have too many failures
+            // Reconnect on IO errors with multiple failures
             if (e is IOException && failures >= 2) {
                 isConnected = false
                 context?.let { ctx ->
-                    showToast(ctx, "⚠️ TTL error, reconnecting...")
+                    showToast(ctx, "TTL error, reconnecting...")
                     attemptReconnection(ctx, "IO error after $failures failures")
                 }
             } else {
-                context?.let { showToast(it, "❌ TTL: ${e.message}") }
+                context?.let { showToast(it, "TTL error: ${e.message}") }
             }
 
-            return 0 // Return 0 bytes written on error
+            return false
         }
     }
-    // Better IO manager with error handling
+
     fun startReading() {
         if (port == null) {
-            addLog("❌ Cannot start reading: port is null")
+            addLog("Cannot start reading: port is null")
             return
         }
 
         try {
-            addLog("🔍 Starting TTL data reader...")
+            addLog("Starting TTL data reader...")
 
             ioManager = SerialInputOutputManager(port!!, object : SerialInputOutputManager.Listener {
                 override fun onNewData(data: ByteArray) {
                     try {
                         val output = data.joinToString(" ") { "0x${String.format("%02X", it)} (${it.toUByte()})" }
-                        addLog("📥 Read: $output")
+                        addLog("Read: $output")
                         readCallback(output)
                     } catch (e: Exception) {
                         Log.e("SerialTtl", "Error processing received data: ${e.message}")
@@ -469,9 +450,8 @@ object SerialTtlManager {
                 }
 
                 override fun onRunError(e: Exception) {
-                    addLog("❌ IO Manager error: ${e.message}")
+                    addLog("IO Manager error: ${e.message}")
 
-                    // Don't immediately trigger reconnection on read errors
                     val failures = consecutiveFailures.incrementAndGet()
                     if (failures >= 3) {
                         isConnected = false
@@ -485,20 +465,19 @@ object SerialTtlManager {
             executor.submit {
                 try {
                     ioManager?.start()
-                    addLog("✅ TTL reader started")
+                    addLog("TTL reader started")
                 } catch (e: Exception) {
-                    addLog("❌ TTL reader start error: ${e.message}")
+                    addLog("TTL reader start error: ${e.message}")
                     isConnected = false
                 }
             }
 
         } catch (e: Exception) {
-            addLog("❌ Failed to start IO Manager: ${e.message}")
+            addLog("Failed to start IO Manager: ${e.message}")
             isConnected = false
         }
     }
 
-    // Better cleanup
     private fun cleanupConnection() {
         try {
             isConnected = false
@@ -509,11 +488,10 @@ object SerialTtlManager {
             port?.close()
             port = null
 
-            // Reset last sent values
             lastSentSpeedLimit.set(-1)
             lastSentTime.set(0)
 
-            Log.d("SerialTtl", "🧹 Connection cleaned up")
+            Log.d("SerialTtl", "Connection cleaned up")
         } catch (e: Exception) {
             Log.w("SerialTtl", "Warning during cleanup: ${e.message}")
         }
@@ -536,16 +514,15 @@ object SerialTtlManager {
             }
 
             isReceiverRegistered = true
-            Log.d("SerialTtl", "✅ USB receivers registered")
+            Log.d("SerialTtl", "USB receivers registered")
         } catch (e: Exception) {
-            Log.e("SerialTtl", "❌ Error registering USB receivers: ${e.message}")
+            Log.e("SerialTtl", "Error registering USB receivers: ${e.message}")
         }
     }
 
-    // Better close method
     fun close() {
         try {
-            Log.i("SerialTtl", "🔍 Closing TTL connection...")
+            Log.i("SerialTtl", "Closing TTL connection...")
 
             cleanupConnection()
             initializationInProgress.set(false)
@@ -559,17 +536,17 @@ object SerialTtlManager {
                         ctx.unregisterReceiver(usbReceiver)
                         isReceiverRegistered = false
                     } catch (e: Exception) {
-                        Log.d("SerialTtl", "⚠️ Receiver already unregistered")
+                        Log.d("SerialTtl", "Receiver already unregistered")
                     }
                 }
             }
 
             val attempts = sendAttempts.get()
             val successes = successfulSends.get()
-            addLog("🔌 TTL connection closed - Sends: $successes/$attempts")
+            addLog("TTL connection closed - Sends: $successes/$attempts")
 
         } catch (e: Exception) {
-            addLog("❌ Error during TTL close: ${e.message}")
+            addLog("Error during TTL close: ${e.message}")
         }
     }
 
@@ -581,17 +558,16 @@ object SerialTtlManager {
         else "N/A"
 
         return """
-            |🔍 TTL Debug Status:
-            |• Connected: $isConnected (for $connectionAge)
-            |• Port: ${if (port != null) "Available" else "NULL"}
-            |• Init in Progress: ${initializationInProgress.get()}
-            |• Reconnection in Progress: ${reconnectionInProgress.get()}
-            |• Retry Count: ${connectionRetryCount.get()}/$maxRetries
-            |• Consecutive Failures: ${consecutiveFailures.get()}
-            |• Send Success Rate: ${if (attempts > 0) "${(successes * 100 / attempts)}%" else "N/A"}
-            |• Last Sent: ${lastSentSpeedLimit.get()} (${(System.currentTimeMillis() - lastSentTime.get()) / 1000}s ago)
-            |• Last Logs: ${ttlLogs.takeLast(3).joinToString("; ")}
-        """.trimMargin()
+            TTL Debug Status:
+            • Connected: $isConnected (for $connectionAge)
+            • Port: ${if (port != null) "Available" else "NULL"}
+            • Init in Progress: ${initializationInProgress.get()}
+            • Reconnection in Progress: ${reconnectionInProgress.get()}
+            • Retry Count: ${connectionRetryCount.get()}/$maxRetries
+            • Consecutive Failures: ${consecutiveFailures.get()}
+            • Send Success Rate: ${if (attempts > 0) "${(successes * 100 / attempts)}%" else "N/A"}
+            • Last Sent: ${lastSentSpeedLimit.get()} (${(System.currentTimeMillis() - lastSentTime.get()) / 1000}s ago)
+        """.trimIndent()
     }
 
     fun getCacheStats(): String {
@@ -600,7 +576,6 @@ object SerialTtlManager {
         return "TTL: $successes/$attempts (${if (attempts > 0) "${(successes * 100 / attempts)}%" else "0%"})"
     }
 
-    // Better logging with size control
     private fun addLog(message: String) {
         try {
             val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
@@ -609,7 +584,7 @@ object SerialTtlManager {
 
             synchronized(ttlLogs) {
                 ttlLogs.add(logMsg)
-                if (ttlLogs.size > 100) { // Keep only last 100 logs
+                if (ttlLogs.size > 100) {
                     repeat(ttlLogs.size - 80) {
                         if (ttlLogs.isNotEmpty()) {
                             ttlLogs.removeAt(0)

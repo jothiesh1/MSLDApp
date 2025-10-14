@@ -1,28 +1,41 @@
-// COMPLETE FIXED: All Complex Systems Working with IMPROVED Bridge Detection
-// File: app/src/main/java/com/gpstracker/msldapp/uis/StableSpeedLimitManager.kt
+// File: StableSpeedLimitManager.kt
+// COMPLETE VERSION with CONTINUOUS TTL Support
+// Features: Road Lock, Bridge Detection, Residential/School Zones, Speed Jump Detection,
+//           Highway Stickiness, Smart Verification, Worldwide OSM Support, Continuous TTL
 
 package com.gpstracker.msldapp.uis
 
+import android.util.Log
 import java.lang.Math.toRadians
 import kotlin.math.*
 import java.util.ArrayDeque
-import kotlinx.coroutines.*
 
-/**
- * FIXED COMPLETE SYSTEM: All complex features working with improved bridge detection
- * 1. Highway classification (motorway, trunk, primary, etc.)
- * 2. IMPROVED Ground level detection (bridge, tunnel, ground) - FIXES flyover detection
- * 3. SPEED JUMP DETECTION (prevents rapid changes between ANY speeds)
- * 4. Highway stickiness logic (prevents rapid transitions)
- * 5. Smart verification timing (different speeds for different transitions)
- * 6. SIMPLIFIED enforcement (OSM direct or defaults)
- * 7. Altitude collection and display
- * 8. Continuous TTL for all states
- * 9. All systems working together consistently
- */
 class StableSpeedLimitManager {
 
-    // Current stable state with highway info
+    // ===== ROAD LOCK SYSTEM =====
+    enum class RoadLockMode {
+        BRIDGE_LOCKED, MAIN_LOCKED, SERVICE_LOCKED,
+        MOTORWAY_LOCKED, RESIDENTIAL_LOCKED, SCHOOL_LOCKED, UNLOCKED
+    }
+
+    data class RoadLockState(
+        val mode: RoadLockMode,
+        val lockedAt: Long,
+        val lockStrength: Int,
+        val lastValidSpeed: Int?,
+        val lockReason: String
+    )
+
+    private var currentRoadLock: RoadLockState? = null
+    private var consecutiveBlockedReadings = 0
+    private val roadLockHistory = ArrayDeque<RoadLockState>(5)
+
+    // Movement tracking
+    private var lastLocationData: Triple<Double, Double, Double>? = null
+    private var lastBearing: Float = 0f
+    private var lastTimestamp: Long = 0L
+
+    // Current stable state
     private var confirmedSpeedLimit: Int? = null
     private var confirmedRoadCenter: Pair<Double, Double>? = null
     private var confirmedAltitude: Double? = null
@@ -32,25 +45,25 @@ class StableSpeedLimitManager {
     private var consecutiveSameReadings = 0
 
     // Voting system
-    private val recentReadings = ArrayDeque<Int>()
+    private val recentReadings = ArrayDeque<Int>(7)
     private val votingStartTime = mutableMapOf<Int, Long>()
 
-    // GPS smoothing with altitude
-    private val gpsHistory = ArrayDeque<Triple<Double, Double, Double>>()
+    // GPS smoothing
+    private val gpsHistory = ArrayDeque<Triple<Double, Double, Double>>(3)
 
-    // Last known persistence with highway info
+    // Last known persistence
     private var lastKnownSpeedLimit: Int? = null
     private var lastKnownHighwayInfo: HighwayInfo? = null
     private var lastKnownEnforcementReason: String? = null
     private var lastKnownLimitTime = 0L
     private var noDataCount = 0
 
-    // Continuous TTL system
+    // TTL system - ENHANCED
     private var lastTtlSendTime = 0L
     private var lastSentSpeedLimit: Int? = null
     private val TTL_SEND_INTERVAL = 20000L // 20 seconds
 
-    // Smart verification system
+    // Verification system
     private var pendingSpeedLimit: Int? = null
     private var pendingEnforcementReason: String? = null
     private var verificationCount = 0
@@ -59,15 +72,19 @@ class StableSpeedLimitManager {
     private var requiredVerifications = 3
     private var verificationInterval = 1000L
 
-    // FIXED CONSTANTS: Now work with any speed changes
-    private companion object {
-        private const val LARGE_SPEED_JUMP_THRESHOLD = 60
-        private const val MEDIUM_SPEED_JUMP_THRESHOLD = 40
-        private const val HIGH_SPEED_THRESHOLD = 80
-        private const val HIGH_SPEED_STICK_TIME = 15000L
+    companion object {
+        private const val MAX_BLOCKS = 12
+        private const val LARGE_SPEED_JUMP = 60
+        private const val MEDIUM_SPEED_JUMP = 40
+        private const val HIGH_SPEED = 80
+        private const val STICK_TIME = 15000L
+
+        private val MOTORWAY_SPEEDS = mapOf("UAE" to 120, "INDIA" to 100, "KENYA" to 110, "DEFAULT" to 100)
+        private val TRUNK_SPEEDS = mapOf("UAE" to 100, "INDIA" to 80, "KENYA" to 80, "DEFAULT" to 80)
+        private val PRIMARY_SPEEDS = mapOf("UAE" to 80, "INDIA" to 60, "KENYA" to 60, "DEFAULT" to 60)
+        private val SERVICE_SPEEDS = mapOf("UAE" to 50, "INDIA" to 40, "KENYA" to 30, "DEFAULT" to 40)
     }
 
-    // Highway classification system (unchanged)
     data class HighwayInfo(
         val type: String,
         val isHighway: Boolean,
@@ -78,805 +95,406 @@ class StableSpeedLimitManager {
         val levelType: String,
         val minSpeedLimit: Int,
         val maxSpeedLimit: Int,
-        val defaultSpeed: Int
+        val defaultSpeed: Int,
+        val roadName: String = "Unknown",
+        val multilingualNames: Map<String, String> = emptyMap(),
+        val region: String = "DEFAULT",
+        val isResidential: Boolean = false,
+        val isSchoolZone: Boolean = false
     )
 
+    // ===== TTL SYSTEM - CONTINUOUS SENDING =====
+
     /**
-     * FIXED: Universal road level detection for UAE and India OSM data
-     * This fixes the bridge detection issue where flyovers were showing as GROUND
+     * FIXED: Always allow sending for continuous TTL transmission
+     * Sends same value every 20 seconds OR when speed changes
      */
+    private fun shouldSendToTtl(currentSpeed: Int): Boolean {
+        val now = System.currentTimeMillis()
+        val timeSinceLastSend = now - lastTtlSendTime
+
+        val shouldSend = when {
+            // First send - always allow
+            lastSentSpeedLimit == null -> {
+                Log.d("StableManager", "TTL: First send - Speed: $currentSpeed")
+                true
+            }
+            // Speed changed - send immediately
+            lastSentSpeedLimit != currentSpeed -> {
+                Log.d("StableManager", "TTL: Speed changed ${lastSentSpeedLimit} -> $currentSpeed")
+                true
+            }
+            // Same speed but 20 seconds elapsed - send again to maintain continuous transmission
+            timeSinceLastSend >= TTL_SEND_INTERVAL -> {
+                Log.d("StableManager", "TTL: Continuous send - Same speed $currentSpeed (${timeSinceLastSend}ms since last)")
+                true
+            }
+            // Skip if within 20 second interval
+            else -> {
+                Log.d("StableManager", "TTL: Wait - ${(TTL_SEND_INTERVAL - timeSinceLastSend)/1000}s until next send")
+                false
+            }
+        }
+
+        return shouldSend
+    }
+
+    /**
+     * Record TTL sent - Call this after successfully sending to TTL
+     */
+    fun recordTtlSent(speedLimit: Int) {
+        val previousTime = lastTtlSendTime
+        val previousSpeed = lastSentSpeedLimit
+
+        lastTtlSendTime = System.currentTimeMillis()
+        lastSentSpeedLimit = speedLimit
+
+        val timeSinceLast = if (previousTime > 0) {
+            (lastTtlSendTime - previousTime) / 1000
+        } else {
+            0
+        }
+
+        if (previousSpeed == speedLimit) {
+            Log.d("StableManager", "TTL: Continuous send recorded - $speedLimit km/h (same value after ${timeSinceLast}s)")
+        } else {
+            Log.d("StableManager", "TTL: New speed recorded - $previousSpeed -> $speedLimit km/h")
+        }
+    }
+
+    // ===== ROAD DETECTION =====
+
     private fun detectRoadLevel(tags: Map<String, String>): String {
         val highway = tags["highway"] ?: "unknown"
         val layer = tags["layer"]?.toIntOrNull() ?: 0
         val bridge = tags["bridge"] == "yes"
         val tunnel = tags["tunnel"] == "yes"
-        val name = tags["name"]?.lowercase() ?: ""
-        val embankment = tags["embankment"] == "yes"
+        val name = extractBestRoadName(tags).lowercase()
+        val level = tags["level"]?.toIntOrNull() ?: 0
 
         return when {
-            // Underground structures
+            bridge && layer > 1 -> "BRIDGE_L${layer}"
+            bridge -> "BRIDGE"
+            "flyover" in name -> "FLYOVER"
+            "overpass" in name -> "OVERPASS"
+            "bridge" in name -> "BRIDGE"
+            "elevated" in name -> "ELEVATED"
+            level > 0 -> "ELEVATED_L${level}"
+            layer > 0 -> "ELEVATED_L${layer}"
+            tags["embankment"] == "yes" -> "EMBANKMENT"
             tunnel -> "TUNNEL"
-            tunnel && layer < 0 -> "TUNNEL_L${Math.abs(layer)}"
-            layer < 0 -> "UNDERGROUND_L${Math.abs(layer)}"
-
-            // Elevated structures (FIXED: More comprehensive detection)
-            bridge && layer > 1 -> "BRIDGE_L${layer}"     // Multi-level bridges
-            bridge -> "BRIDGE"                             // ANY bridge=yes = elevated
-            layer > 0 -> "ELEVATED_L${layer}"             // Positive layer without bridge tag
-            embankment -> "EMBANKMENT"                     // Raised earthwork
-
-            // Name-based detection (common in India/UAE)
-            name.contains("flyover") -> "FLYOVER"
-            name.contains("overpass") -> "OVERPASS"
-            name.contains("bridge") -> "BRIDGE"
-            name.contains("elevated") -> "ELEVATED"
-            name.contains("expressway") -> "EXPRESSWAY"
-
-            // Highway-specific defaults (UAE style)
-            highway == "motorway" -> "EXPRESSWAY"          // Typically elevated in cities
-            highway == "trunk" && layer >= 0 -> "HIGHWAY"  // Major highways often elevated
-
-            // Ground level (default)
+            layer < 0 -> "UNDERGROUND_L${abs(layer)}"
+            highway == "motorway" -> "MOTORWAY"
+            highway == "trunk" && layer >= 0 -> "HIGHWAY"
             else -> "GROUND"
         }
     }
 
-    /**
-     * FIXED HIGHWAY ANALYSIS: Now uses improved bridge detection
-     */
+    private fun extractBestRoadName(tags: Map<String, String>): String {
+        val nameKeys = listOf("name:en", "name", "name:ar", "name:hi", "name:kn", "name:ta", "name:sw", "ref")
+        for (key in nameKeys) {
+            tags[key]?.let { if (it.isNotBlank()) return it }
+        }
+        return "Unnamed Road"
+    }
+
+    private fun detectRegion(tags: Map<String, String>, roadName: String): String {
+        tags["source:maxspeed"]?.let { source ->
+            if ("IN:" in source) return "INDIA"
+            if ("AE:" in source) return "UAE"
+        }
+
+        val nameLower = roadName.lowercase()
+        return when {
+            "sheikh" in nameLower || tags.containsKey("name:ar") -> "UAE"
+            "nh " in nameLower || tags.containsKey("name:hi") -> "INDIA"
+            "a1" in nameLower || tags.containsKey("name:sw") -> "KENYA"
+            else -> "DEFAULT"
+        }
+    }
+
     private fun analyzeHighway(tags: Map<String, String>): HighwayInfo {
         val highway = tags["highway"] ?: "unknown"
         val layer = tags["layer"]?.toIntOrNull() ?: 0
-        val bridge = tags["bridge"] == "yes"
-        val tunnel = tags["tunnel"] == "yes"
-
-        // USE NEW IMPROVED DETECTION METHOD
+        val roadName = extractBestRoadName(tags)
+        val region = detectRegion(tags, roadName)
         val levelType = detectRoadLevel(tags)
+        val nameLower = roadName.lowercase()
 
-        LogCollector.addDetailedLog(
-            LogCollector.LogCategory.OSM,
-            "IMPROVED BRIDGE DETECTION: ${highway} → ${levelType}",
-            mapOf(
-                "bridge" to if (bridge) "YES" else "NO",
-                "layer" to layer.toString(),
-                "tunnel" to if (tunnel) "YES" else "NO",
-                "name" to (tags["name"] ?: "N/A"),
-                "detected_level" to levelType
-            )
-        )
+        val isResidential = highway == "residential" || "residential" in nameLower
+        val isSchoolZone = "school" in nameLower || tags["zone:traffic"] == "school"
 
         return when (highway) {
             "motorway" -> HighwayInfo(
                 type = "MOTORWAY", isHighway = true, priority = 90,
                 description = "MOTORWAY ($levelType)", icon = "🛣️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 80
+                minSpeedLimit = 60, maxSpeedLimit = 160,
+                defaultSpeed = MOTORWAY_SPEEDS[region] ?: 100,
+                roadName = roadName, region = region
             )
             "trunk" -> HighwayInfo(
                 type = "TRUNK", isHighway = true, priority = 85,
                 description = "TRUNK HIGHWAY ($levelType)", icon = "🛣️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 80
+                minSpeedLimit = 50, maxSpeedLimit = 120,
+                defaultSpeed = TRUNK_SPEEDS[region] ?: 80,
+                roadName = roadName, region = region
             )
             "primary" -> HighwayInfo(
                 type = "PRIMARY", isHighway = false, priority = 70,
                 description = "PRIMARY ROAD ($levelType)", icon = "🛤️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 60
+                minSpeedLimit = 40, maxSpeedLimit = 100,
+                defaultSpeed = PRIMARY_SPEEDS[region] ?: 60,
+                roadName = roadName, region = region
             )
             "secondary" -> HighwayInfo(
                 type = "SECONDARY", isHighway = false, priority = 60,
                 description = "SECONDARY ROAD ($levelType)", icon = "🛤️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 40
-            )
-            "tertiary" -> HighwayInfo(
-                type = "TERTIARY", isHighway = false, priority = 50,
-                description = "LOCAL ROAD ($levelType)", icon = "🛤️",
-                layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 40
+                minSpeedLimit = 30, maxSpeedLimit = 80,
+                defaultSpeed = 50,
+                roadName = roadName, region = region
             )
             "residential" -> HighwayInfo(
                 type = "RESIDENTIAL", isHighway = false, priority = 40,
                 description = "RESIDENTIAL ($levelType)", icon = "🏘️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 30
+                minSpeedLimit = 15, maxSpeedLimit = 50,
+                defaultSpeed = 30,
+                roadName = roadName, region = region,
+                isResidential = true
             )
             "service" -> HighwayInfo(
                 type = "SERVICE", isHighway = false, priority = 30,
                 description = "SERVICE ROAD ($levelType)", icon = "🅿️",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 40
+                minSpeedLimit = 10, maxSpeedLimit = 60,
+                defaultSpeed = SERVICE_SPEEDS[region] ?: 40,
+                roadName = roadName, region = region
             )
             else -> HighwayInfo(
                 type = "UNKNOWN", isHighway = false, priority = 20,
-                description = "UNKNOWN ROAD ($levelType)", icon = "❓",
+                description = "ROAD ($levelType)", icon = "❓",
                 layer = layer, levelType = levelType,
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 50
+                minSpeedLimit = 20, maxSpeedLimit = 80,
+                defaultSpeed = 50,
+                roadName = roadName, region = region,
+                isSchoolZone = isSchoolZone
             )
         }
     }
 
-    /**
-     * FIXED SPEED JUMP DETECTION: Now works with any speed changes
-     */
-    private fun isLargeSpeedJump(currentSpeed: Int?, newSpeed: Int): Boolean {
-        if (currentSpeed == null) return false
-        val speedDiff = abs(newSpeed - currentSpeed)
+    // ===== ROAD LOCK SYSTEM =====
+
+    private fun getRoadLockCandidate(tags: Map<String, String>): RoadLockMode {
+        val highway = tags["highway"] ?: "unknown"
+        val bridge = tags["bridge"] == "yes"
+        val layer = tags["layer"]?.toIntOrNull() ?: 0
+        val level = tags["level"]?.toIntOrNull() ?: 0
+        val name = extractBestRoadName(tags).lowercase()
+        val service = tags["service"] ?: ""
 
         return when {
-            speedDiff >= LARGE_SPEED_JUMP_THRESHOLD -> true  // Any 60+ km/h jump
-            speedDiff >= MEDIUM_SPEED_JUMP_THRESHOLD && currentSpeed > HIGH_SPEED_THRESHOLD -> true  // 40+ jump from high speed
-            speedDiff >= MEDIUM_SPEED_JUMP_THRESHOLD && newSpeed < currentSpeed -> true  // 40+ decreases
-            else -> false
+            "school" in name || tags["zone:traffic"] == "school" -> RoadLockMode.SCHOOL_LOCKED
+            highway == "residential" || tags["zone:traffic"] == "residential" -> RoadLockMode.RESIDENTIAL_LOCKED
+            bridge || layer > 0 || level > 0 ||
+                    "flyover" in name || "overpass" in name ||
+                    "bridge" in name || "elevated" in name -> RoadLockMode.BRIDGE_LOCKED
+            highway == "service" || service.isNotEmpty() -> RoadLockMode.SERVICE_LOCKED
+            highway in listOf("motorway", "motorway_link") -> RoadLockMode.MOTORWAY_LOCKED
+            highway in listOf("trunk", "primary", "secondary", "tertiary") && !bridge && layer <= 0 -> RoadLockMode.MAIN_LOCKED
+            else -> RoadLockMode.UNLOCKED
         }
     }
 
-    /**
-     * FIXED HIGHWAY STICKINESS: Now works with simplified enforcement
-     */
-    private fun shouldStickToHighwaySpeed(
-        currentSpeedLimit: Int?,
-        newSpeedLimit: Int,
-        drivingSpeed: Float,
-        timeSinceConfirmed: Long
+    private fun shouldEstablishRoadLock(
+        tags: Map<String, String>,
+        currentSpeed: Float,
+        location: Triple<Double, Double, Double>
     ): Boolean {
-        if (currentSpeedLimit == null) return false
+        val candidate = getRoadLockCandidate(tags)
+        if (candidate == RoadLockMode.UNLOCKED) return false
 
-        return when {
-            // Stick to high speeds when driving fast
-            drivingSpeed > HIGH_SPEED_THRESHOLD &&
-                    currentSpeedLimit >= 100 &&
-                    newSpeedLimit <= 60 &&
-                    timeSinceConfirmed < HIGH_SPEED_STICK_TIME -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "🔒 HIGHWAY STICKINESS: Staying on ${currentSpeedLimit}km/h (driving ${drivingSpeed.toInt()}km/h)"
-                )
-                true
+        var confidence = 0.0
+        val highway = tags["highway"] ?: ""
+        val name = extractBestRoadName(tags).lowercase()
+
+        when (candidate) {
+            RoadLockMode.SCHOOL_LOCKED -> {
+                if ("school" in name) confidence += 0.9
+                if (tags["zone:traffic"] == "school") confidence += 0.8
+                if (currentSpeed < 40f) confidence += 0.3
+                return confidence >= 0.8
             }
-            // Stick to any high speeds temporarily to prevent rapid changes
-            currentSpeedLimit >= 80 &&
-                    newSpeedLimit <= 50 &&
-                    timeSinceConfirmed < 8000L -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "⏱️ TEMPORARY STICK: ${currentSpeedLimit}km/h→${newSpeedLimit}km/h (${timeSinceConfirmed/1000}s)"
-                )
-                true
+            RoadLockMode.RESIDENTIAL_LOCKED -> {
+                if (highway == "residential") confidence += 0.8
+                if (currentSpeed < 50f) confidence += 0.3
+                return confidence >= 0.7
             }
-            else -> false
+            RoadLockMode.BRIDGE_LOCKED -> {
+                if (tags["bridge"] == "yes") confidence += 0.5
+                if (tags["layer"]?.toIntOrNull()?.let { it > 0 } == true) confidence += 0.3
+                if ("flyover" in name || "bridge" in name) confidence += 0.4
+                if (currentSpeed > 30f) confidence += 0.2
+                return confidence >= 0.5
+            }
+            RoadLockMode.SERVICE_LOCKED -> {
+                if (highway == "service") confidence += 0.8
+                if (currentSpeed < 40f) confidence += 0.3
+                return confidence >= 0.7
+            }
+            RoadLockMode.MOTORWAY_LOCKED -> {
+                if (highway == "motorway") confidence += 0.9
+                if (currentSpeed > 60f) confidence += 0.4
+                return confidence >= 0.7
+            }
+            RoadLockMode.MAIN_LOCKED -> {
+                if (highway in listOf("trunk", "primary", "secondary", "tertiary")) confidence += 0.7
+                if (currentSpeed in 30f..80f) confidence += 0.3
+                return confidence >= 0.6
+            }
+            else -> return false
         }
     }
 
-    /**
-     * FIXED ENFORCEMENT: Simplified and consistent
-     */
-    private fun enforceHighwaySpeed(speedLimit: Int?, highwayInfo: HighwayInfo): Pair<Int, String> {
-        return if (speedLimit == null) {
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.OSM,
-                "No OSM Speed Data: ${highwayInfo.description} → Default ${highwayInfo.defaultSpeed}km/h"
-            )
-            Pair(highwayInfo.defaultSpeed, "default_speed")
-        } else {
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.OSM,
-                "OSM Speed Available: ${highwayInfo.description} → ${speedLimit}km/h (direct from OSM)"
-            )
-            Pair(speedLimit, "osm_speed")
-        }
-    }
-
-    /**
-     * FIXED SMART VERIFICATION: Now works with new reason codes
-     */
-    private fun getSmartVerificationSettings(
-        currentSpeed: Int,
-        newSpeed: Int,
-        currentReason: String,
-        newReason: String,
-        highwayInfo: HighwayInfo
-    ): Pair<Int, Long> {
-
-        val speedDiff = abs(newSpeed - currentSpeed)
-        val transitionType = when {
-            // Both from OSM
-            currentReason == "osm_speed" && newReason == "osm_speed" -> {
-                if (newSpeed > currentSpeed) "osm_increase" else "osm_decrease"
-            }
-            // From default to OSM (found actual speed!)
-            currentReason == "default_speed" && newReason == "osm_speed" -> "default_to_osm"
-            // From OSM to default (lost speed data)
-            currentReason == "osm_speed" && newReason == "default_speed" -> "osm_to_default"
-            // Between defaults
-            else -> "default_change"
-        }
-
-        return when {
-            // Large speed jumps need more verification regardless of source
-            speedDiff >= LARGE_SPEED_JUMP_THRESHOLD -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "🚨 LARGE JUMP: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → CAREFUL (5 checks)"
-                )
-                Pair(5, 1500L)
-            }
-            // Found OSM data - fast verification
-            transitionType == "default_to_osm" -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "🎯 DEFAULT→OSM: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → FAST (2 checks)"
-                )
-                Pair(2, 1000L)
-            }
-            // Lost OSM data - immediate
-            transitionType == "osm_to_default" -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "⚠️ OSM→DEFAULT: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → IMMEDIATE (1 check)"
-                )
-                Pair(1, 500L)
-            }
-            // OSM speed increases - fast
-            transitionType == "osm_increase" -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "📈 OSM INCREASE: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → FAST (2 checks)"
-                )
-                Pair(2, 1000L)
-            }
-            // OSM speed decreases - slower
-            transitionType == "osm_decrease" -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "📉 OSM DECREASE: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → SLOW (4 checks)"
-                )
-                Pair(4, 1000L)
-            }
-            // Default cases
-            else -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "🔄 NORMAL CHANGE: ${currentSpeed}→${newSpeed}km/h on ${highwayInfo.description} → NORMAL (3 checks)"
-                )
-                Pair(3, 1000L)
-            }
-        }
-    }
-
-    /**
-     * FIXED SPEED JUMP VERIFICATION: Works with new enforcement
-     */
-    private fun handleSpeedJumpVerification(
-        currentSpeedLimit: Int,
-        newSpeedLimit: Int,
-        currentSpeed: Float,
-        location: Triple<Double, Double, Double>,
-        highwayInfo: HighwayInfo,
-        enforcementReason: String
-    ): StableSpeedResult {
-
-        val speedDiff = abs(newSpeedLimit - currentSpeedLimit)
-        val currentTime = System.currentTimeMillis()
-
-        // Determine verification requirements based on jump size
-        val (requiredVerifications, verificationInterval) = when {
-            speedDiff >= 80 && currentSpeed > 100f -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "🚨 EXTREME SPEED JUMP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 6 verifications needed"
-                )
-                Pair(6, 2000L)
-            }
-            speedDiff >= LARGE_SPEED_JUMP_THRESHOLD -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "⚠️ LARGE SPEED JUMP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 5 verifications needed"
-                )
-                Pair(5, 1500L)
-            }
-            speedDiff >= MEDIUM_SPEED_JUMP_THRESHOLD -> {
-                LogCollector.addDetailedLog(
-                    LogCollector.LogCategory.OSM,
-                    "⚠️ MEDIUM JUMP: ${currentSpeedLimit}→${newSpeedLimit}km/h - 4 verifications needed"
-                )
-                Pair(4, 1000L)
-            }
-            else -> Pair(3, 1000L)
-        }
-
-        when {
-            !isVerifying || pendingSpeedLimit != newSpeedLimit -> {
-                startSpeedJumpVerification(newSpeedLimit, enforcementReason, requiredVerifications, verificationInterval)
-                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                return StableSpeedResult.SpeedJumpVerification(
-                    currentSpeedLimit = currentSpeedLimit,
-                    newSpeedLimit = newSpeedLimit,
-                    verificationCount = 1,
-                    requiredVerifications = requiredVerifications,
-                    jumpSize = speedDiff,
-                    drivingSpeed = currentSpeed,
-                    nextCheckIn = verificationInterval / 1000,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = enforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "speed_jump_verification"
-                )
-            }
-
-            currentTime - lastVerificationTime >= verificationInterval -> {
-                verificationCount++
-                lastVerificationTime = currentTime
-
-                if (verificationCount >= requiredVerifications) {
-                    completeVerificationWithHighway(newSpeedLimit, enforcementReason, location, highwayInfo)
-
-                    LogCollector.addDetailedLog(
-                        LogCollector.LogCategory.OSM,
-                        "✅ SPEED JUMP VERIFIED: ${currentSpeedLimit}→${newSpeedLimit}km/h after ${requiredVerifications} checks"
-                    )
-
-                    return StableSpeedResult.VerificationComplete(
-                        speedLimit = newSpeedLimit,
-                        reason = "speed_jump_verified_${enforcementReason}",
-                        checksPerformed = requiredVerifications,
-                        altitude = location.third,
-                        highwayInfo = highwayInfo,
-                        enforcementReason = enforcementReason,
-                        sendToTtl = true,
-                        ttlReason = "speed_jump_complete"
-                    )
-                } else {
-                    val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                    return StableSpeedResult.SpeedJumpVerification(
-                        currentSpeedLimit = currentSpeedLimit,
-                        newSpeedLimit = newSpeedLimit,
-                        verificationCount = verificationCount,
-                        requiredVerifications = requiredVerifications,
-                        jumpSize = speedDiff,
-                        drivingSpeed = currentSpeed,
-                        nextCheckIn = verificationInterval / 1000,
-                        altitude = location.third,
-                        highwayInfo = highwayInfo,
-                        enforcementReason = enforcementReason,
-                        sendToTtl = shouldSendTtl,
-                        ttlReason = "speed_jump_verification_continuous"
-                    )
-                }
-            }
-
-            else -> {
-                val timeRemaining = verificationInterval - (currentTime - lastVerificationTime)
-                val secondsRemaining = (timeRemaining / 1000).coerceAtLeast(0)
-                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                return StableSpeedResult.SpeedJumpVerification(
-                    currentSpeedLimit = currentSpeedLimit,
-                    newSpeedLimit = newSpeedLimit,
-                    verificationCount = verificationCount,
-                    requiredVerifications = requiredVerifications,
-                    jumpSize = speedDiff,
-                    drivingSpeed = currentSpeed,
-                    nextCheckIn = secondsRemaining,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = enforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "speed_jump_waiting"
-                )
-            }
-        }
-    }
-
-    private fun startSpeedJumpVerification(speedLimit: Int, enforcementReason: String, reqVerifications: Int, verifyInterval: Long) {
-        pendingSpeedLimit = speedLimit
-        pendingEnforcementReason = enforcementReason
-        verificationCount = 1
-        lastVerificationTime = System.currentTimeMillis()
-        isVerifying = true
-        requiredVerifications = reqVerifications
-        verificationInterval = verifyInterval
-    }
-
-    /**
-     * CONTINUOUS TTL CHECKER (unchanged)
-     */
-    private fun shouldSendContinuousTtl(currentSpeed: Int): Boolean {
-        val timeSinceLastSend = System.currentTimeMillis() - lastTtlSendTime
-        return when {
-            lastSentSpeedLimit == null -> true
-            lastSentSpeedLimit != currentSpeed -> true
-            timeSinceLastSend >= TTL_SEND_INTERVAL -> true
-            else -> false
-        }
-    }
-
-    fun recordTtlSent(speedLimit: Int) {
-        lastTtlSendTime = System.currentTimeMillis()
-        lastSentSpeedLimit = speedLimit
-        LogCollector.addDetailedLog(
-            LogCollector.LogCategory.BACKEND,
-            "📤 Continuous TTL sent: ${speedLimit}km/h (20s interval)"
-        )
-    }
-
-    // Compatibility methods (unchanged)
-    private fun ArrayDeque<Int>.addToEnd(item: Int) {
-        this.add(item)
-        while (this.size > 7) {
-            this.removeFirst()
-        }
-    }
-
-    private fun ArrayDeque<Triple<Double, Double, Double>>.addToEnd(item: Triple<Double, Double, Double>) {
-        this.add(item)
-        while (this.size > 3) {
-            this.removeFirst()
-        }
-    }
-
-    /**
-     * MAIN FUNCTION: Fixed integration of all systems with improved bridge detection
-     */
-    fun getStableSpeedLimit(
-        rawLat: Double,
-        rawLon: Double,
-        rawAltitude: Double,
-        currentSpeed: Float,
-        rawSpeedLimit: Int?,
-        osmTags: Map<String, String> = emptyMap()
-    ): StableSpeedResult {
-
-        val highwayInfo = if (osmTags.isNotEmpty()) {
-            analyzeHighway(osmTags)
-        } else {
-            HighwayInfo(
-                type = "UNKNOWN", isHighway = false, priority = 50,
-                description = "UNKNOWN ROAD (GROUND)", icon = "❓",
-                layer = 0, levelType = "GROUND",
-                minSpeedLimit = 0, maxSpeedLimit = 999, defaultSpeed = 50
-            )
-        }
-
-        // Case 1: No OSM data
-        if (rawSpeedLimit == null) {
-            noDataCount++
-            if (isVerifying) {
-                cancelVerification("no_osm_data")
-            }
-
-            val lastKnown = lastKnownSpeedLimit
-            val lastHighway = lastKnownHighwayInfo ?: highwayInfo
-            val timeSinceLastKnown = System.currentTimeMillis() - lastKnownLimitTime
-
-            return if (lastKnown != null) {
-                val (enforcedLimit, enforcementReason) = enforceHighwaySpeed(null, lastHighway)
-                val shouldSendTtl = shouldSendContinuousTtl(enforcedLimit)
-
-                StableSpeedResult.UsingLastKnown(
-                    speedLimit = enforcedLimit,
-                    reason = "no_osm_${enforcementReason}",
-                    timeSinceLastKnown = timeSinceLastKnown,
-                    noDataCount = noDataCount,
-                    altitude = rawAltitude,
-                    highwayInfo = lastHighway,
-                    enforcementReason = enforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "no_osm_continuous"
-                )
-            } else {
-                StableSpeedResult.NoData
-            }
-        }
-
-        // Case 2: OSM works
-        noDataCount = 0
-        val smoothLocation = smoothGPSCoordinates(rawLat, rawLon, rawAltitude)
-        val (enforcedSpeedLimit, enforcementReason) = enforceHighwaySpeed(rawSpeedLimit, highwayInfo)
-
-        // Check road stickiness
-        val shouldStick = shouldStickToConfirmedRoad(smoothLocation, enforcedSpeedLimit, enforcementReason, highwayInfo)
-        if (shouldStick) {
-            if (isVerifying) {
-                cancelVerification("road_stickiness")
-            }
-
-            val confirmedSpeed = confirmedSpeedLimit!!
-            val confirmedHighway = confirmedHighwayInfo!!
-            val shouldSendTtl = shouldSendContinuousTtl(confirmedSpeed)
-
-            return StableSpeedResult.Confirmed(
-                speedLimit = confirmedSpeed,
-                reason = "road_stickiness_${confirmedEnforcementReason}",
-                timeSinceConfirmed = System.currentTimeMillis() - roadConfirmedAt,
-                altitude = smoothLocation.third,
-                highwayInfo = confirmedHighway,
-                enforcementReason = confirmedEnforcementReason ?: "unknown",
-                sendToTtl = shouldSendTtl,
-                ttlReason = "stable_continuous"
-            )
-        }
-
-        val currentConfirmed = confirmedSpeedLimit
-        val currentEnforcementReason = confirmedEnforcementReason
-
-        if (currentConfirmed != null && (enforcedSpeedLimit != currentConfirmed || enforcementReason != currentEnforcementReason)) {
-
-            // Check for speed jumps
-            if (isLargeSpeedJump(currentConfirmed, enforcedSpeedLimit)) {
-                return handleSpeedJumpVerification(
-                    currentConfirmed, enforcedSpeedLimit, currentSpeed,
-                    smoothLocation, highwayInfo, enforcementReason
-                )
-            }
-
-            // Check highway stickiness for high speeds
-            if (shouldStickToHighwaySpeed(currentConfirmed, enforcedSpeedLimit, currentSpeed, System.currentTimeMillis() - roadConfirmedAt)) {
-                val shouldSendTtl = shouldSendContinuousTtl(currentConfirmed)
-
-                return StableSpeedResult.Confirmed(
-                    speedLimit = currentConfirmed,
-                    reason = "highway_stickiness_${currentEnforcementReason}",
-                    timeSinceConfirmed = System.currentTimeMillis() - roadConfirmedAt,
-                    altitude = smoothLocation.third,
-                    highwayInfo = confirmedHighwayInfo!!,
-                    enforcementReason = currentEnforcementReason ?: "unknown",
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "highway_stickiness_continuous"
-                )
-            }
-
-            // Normal verification
-            return handleSmartHighwayVerification(
-                enforcedSpeedLimit, currentConfirmed,
-                enforcementReason, currentEnforcementReason ?: "unknown",
-                smoothLocation, currentSpeed, highwayInfo
-            )
-        } else {
-            if (isVerifying) {
-                cancelVerification("same_speed_and_reason_detected")
-            }
-
-            val votingResult = addToVotingAndCheck(enforcedSpeedLimit, currentSpeed)
-            return handleVotingResult(votingResult, smoothLocation, highwayInfo, enforcementReason)
-        }
-    }
-
-    /**
-     * FIXED SMART HIGHWAY VERIFICATION HANDLER
-     */
-    private fun handleSmartHighwayVerification(
-        newSpeedLimit: Int,
-        currentSpeedLimit: Int,
-        newEnforcementReason: String,
-        currentEnforcementReason: String,
-        location: Triple<Double, Double, Double>,
-        currentSpeed: Float,
-        highwayInfo: HighwayInfo
-    ): StableSpeedResult {
-        val currentTime = System.currentTimeMillis()
-
-        when {
-            !isVerifying || pendingSpeedLimit != newSpeedLimit || pendingEnforcementReason != newEnforcementReason -> {
-                val (reqVerifications, verifyInterval) = getSmartVerificationSettings(
-                    currentSpeedLimit, newSpeedLimit,
-                    currentEnforcementReason, newEnforcementReason,
-                    highwayInfo
-                )
-                startSmartVerification(newSpeedLimit, newEnforcementReason, reqVerifications, verifyInterval)
-
-                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                return StableSpeedResult.Verifying(
-                    currentSpeedLimit = currentSpeedLimit,
-                    newSpeedLimit = newSpeedLimit,
-                    verificationCount = 1,
-                    requiredVerifications = reqVerifications,
-                    nextCheckIn = verifyInterval / 1000,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = newEnforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "highway_verification_continuous"
-                )
-            }
-
-            isVerifying && currentTime - lastVerificationTime >= verificationInterval -> {
-                verificationCount++
-                lastVerificationTime = currentTime
-
-                if (verificationCount >= requiredVerifications) {
-                    completeVerificationWithHighway(newSpeedLimit, newEnforcementReason, location, highwayInfo)
-
-                    return StableSpeedResult.VerificationComplete(
-                        speedLimit = newSpeedLimit,
-                        reason = "highway_verification_complete_${newEnforcementReason}",
-                        checksPerformed = requiredVerifications,
-                        altitude = location.third,
-                        highwayInfo = highwayInfo,
-                        enforcementReason = newEnforcementReason,
-                        sendToTtl = true,
-                        ttlReason = "highway_verification_complete"
-                    )
-                } else {
-                    val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                    return StableSpeedResult.Verifying(
-                        currentSpeedLimit = currentSpeedLimit,
-                        newSpeedLimit = newSpeedLimit,
-                        verificationCount = verificationCount,
-                        requiredVerifications = requiredVerifications,
-                        nextCheckIn = verificationInterval / 1000,
-                        altitude = location.third,
-                        highwayInfo = highwayInfo,
-                        enforcementReason = newEnforcementReason,
-                        sendToTtl = shouldSendTtl,
-                        ttlReason = "highway_verification_continuous"
-                    )
-                }
-            }
-
-            else -> {
-                val timeRemaining = verificationInterval - (currentTime - lastVerificationTime)
-                val secondsRemaining = (timeRemaining / 1000).coerceAtLeast(0)
-                val shouldSendTtl = shouldSendContinuousTtl(currentSpeedLimit)
-
-                return StableSpeedResult.Verifying(
-                    currentSpeedLimit = currentSpeedLimit,
-                    newSpeedLimit = newSpeedLimit,
-                    verificationCount = verificationCount,
-                    requiredVerifications = requiredVerifications,
-                    nextCheckIn = secondsRemaining,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = newEnforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "highway_verification_waiting"
-                )
-            }
-        }
-    }
-
-    private fun startSmartVerification(speedLimit: Int, enforcementReason: String, reqVerifications: Int, verifyInterval: Long) {
-        pendingSpeedLimit = speedLimit
-        pendingEnforcementReason = enforcementReason
-        verificationCount = 1
-        lastVerificationTime = System.currentTimeMillis()
-        isVerifying = true
-        requiredVerifications = reqVerifications
-        verificationInterval = verifyInterval
-    }
-
-    private fun completeVerificationWithHighway(speedLimit: Int, enforcementReason: String, location: Triple<Double, Double, Double>, highwayInfo: HighwayInfo) {
-        confirmedSpeedLimit = speedLimit
-        confirmedRoadCenter = Pair(location.first, location.second)
-        confirmedAltitude = location.third
-        confirmedHighwayInfo = highwayInfo
-        confirmedEnforcementReason = enforcementReason
-        roadConfirmedAt = System.currentTimeMillis()
-        consecutiveSameReadings = 1
-
-        storeLastKnownSpeedWithHighway(speedLimit, highwayInfo, enforcementReason)
-
-        isVerifying = false
-        pendingSpeedLimit = null
-        pendingEnforcementReason = null
-        verificationCount = 0
-        requiredVerifications = 3
-        verificationInterval = 1000L
-
-        recentReadings.clear()
-        votingStartTime.clear()
-    }
-
-    private fun cancelVerification(reason: String) {
-        if (isVerifying) {
-            LogCollector.addDetailedLog(
-                LogCollector.LogCategory.OSM,
-                "❌ HIGHWAY VERIFICATION CANCELLED: ${pendingSpeedLimit}km/h (${pendingEnforcementReason}) (reason: $reason)"
-            )
-        }
-
-        isVerifying = false
-        pendingSpeedLimit = null
-        pendingEnforcementReason = null
-        verificationCount = 0
-        requiredVerifications = 3
-        verificationInterval = 1000L
-    }
-
-    private fun handleVotingResult(votingResult: VotingStatus, location: Triple<Double, Double, Double>, highwayInfo: HighwayInfo, enforcementReason: String): StableSpeedResult {
-        return when (votingResult) {
-            is VotingStatus.Winner -> {
-                confirmNewRoadWithHighway(votingResult.speedLimit, enforcementReason, location, highwayInfo)
-                storeLastKnownSpeedWithHighway(votingResult.speedLimit, highwayInfo, enforcementReason)
-
-                StableSpeedResult.NewConfirmed(
-                    speedLimit = votingResult.speedLimit,
-                    reason = "voting_winner_highway_${enforcementReason}",
-                    votesUsed = votingResult.totalVotes,
-                    timeTaken = votingResult.timeTaken,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = enforcementReason,
-                    sendToTtl = true,
-                    ttlReason = "voting_winner"
-                )
-            }
-
-            is VotingStatus.Collecting -> {
-                val shouldSendTtl = shouldSendContinuousTtl(votingResult.leadingSpeedLimit)
-
-                StableSpeedResult.Voting(
-                    progress = "${votingResult.currentVotes}/5",
-                    timeElapsed = votingResult.timeElapsed,
-                    leadingCandidate = votingResult.leadingSpeedLimit,
-                    altitude = location.third,
-                    highwayInfo = highwayInfo,
-                    enforcementReason = enforcementReason,
-                    sendToTtl = shouldSendTtl,
-                    ttlReason = "voting_continuous"
-                )
-            }
-        }
-    }
-
-    private fun storeLastKnownSpeedWithHighway(speedLimit: Int, highwayInfo: HighwayInfo, enforcementReason: String) {
-        lastKnownSpeedLimit = speedLimit
-        lastKnownHighwayInfo = highwayInfo
-        lastKnownEnforcementReason = enforcementReason
-        lastKnownLimitTime = System.currentTimeMillis()
-    }
-
-    private fun smoothGPSCoordinates(lat: Double, lon: Double, altitude: Double): Triple<Double, Double, Double> {
-        gpsHistory.addToEnd(Triple(lat, lon, altitude))
-        val avgLat = gpsHistory.map { it.first }.average()
-        val avgLon = gpsHistory.map { it.second }.average()
-        val avgAlt = gpsHistory.map { it.third }.average()
-        return Triple(avgLat, avgLon, avgAlt)
-    }
-
-    private fun shouldStickToConfirmedRoad(
-        currentLocation: Triple<Double, Double, Double>,
-        newSpeedLimit: Int,
-        newEnforcementReason: String,
-        highwayInfo: HighwayInfo
-    ): Boolean {
-        val confirmed = confirmedSpeedLimit ?: return false
-        val confirmedHighway = confirmedHighwayInfo ?: return false
-        val confirmedReason = confirmedEnforcementReason ?: return false
-        val roadCenter = confirmedRoadCenter ?: return false
-
-        val timeSinceConfirmed = System.currentTimeMillis() - roadConfirmedAt
-        val distanceFromRoad = calculateDistance(
-            roadCenter.first, roadCenter.second,
-            currentLocation.first, currentLocation.second
+    private fun establishRoadLock(lockMode: RoadLockMode, speedLimit: Int?, reason: String) {
+        val newLock = RoadLockState(
+            mode = lockMode,
+            lockedAt = System.currentTimeMillis(),
+            lockStrength = 1,
+            lastValidSpeed = speedLimit,
+            lockReason = reason
         )
 
-        val stickDistance = if (confirmedHighway.isHighway) 200.0 else 100.0
-        val stickTime = if (confirmedHighway.isHighway) 60000L else 30000L
+        currentRoadLock = newLock
+        consecutiveBlockedReadings = 0
 
-        val reasonChanged = confirmedReason != newEnforcementReason
-        if (reasonChanged) {
-            return false
+        roadLockHistory.addLast(newLock)
+        if (roadLockHistory.size > 5) {
+            roadLockHistory.removeFirst()
+        }
+    }
+
+    private fun filterSpeedByRoadLock(
+        osmSpeedLimit: Int?,
+        osmTags: Map<String, String>
+    ): Pair<Int?, String> {
+        val lock = currentRoadLock ?: return Pair(osmSpeedLimit, "no_lock")
+
+        val highway = osmTags["highway"] ?: "unknown"
+        val bridge = osmTags["bridge"] == "yes"
+        val layer = osmTags["layer"]?.toIntOrNull() ?: 0
+        val level = osmTags["level"]?.toIntOrNull() ?: 0
+        val name = extractBestRoadName(osmTags).lowercase()
+
+        val isValidData = when (lock.mode) {
+            RoadLockMode.SCHOOL_LOCKED -> "school" in name || osmTags["zone:traffic"] == "school"
+            RoadLockMode.RESIDENTIAL_LOCKED -> highway == "residential"
+            RoadLockMode.BRIDGE_LOCKED -> {
+                bridge || layer > 0 || level > 0 ||
+                        "flyover" in name || "overpass" in name ||
+                        "bridge" in name || "elevated" in name
+            }
+            RoadLockMode.SERVICE_LOCKED -> highway == "service" || "service" in name
+            RoadLockMode.MOTORWAY_LOCKED -> highway in listOf("motorway", "motorway_link")
+            RoadLockMode.MAIN_LOCKED -> {
+                highway in listOf("trunk", "primary", "secondary", "tertiary") &&
+                        !bridge && layer <= 0 && level <= 0
+            }
+            RoadLockMode.UNLOCKED -> true
         }
 
-        return when {
-            timeSinceConfirmed < stickTime && distanceFromRoad < 50.0 -> true
-            consecutiveSameReadings >= 5 && distanceFromRoad < stickDistance -> true
-            abs(newSpeedLimit - confirmed) <= 10 && distanceFromRoad < stickDistance -> true
-            confirmedHighway.type == highwayInfo.type && distanceFromRoad < 100.0 -> true
+        return if (isValidData) {
+            currentRoadLock = lock.copy(lockStrength = lock.lockStrength + 1)
+            consecutiveBlockedReadings = 0
+            Pair(osmSpeedLimit, "lock_accepted")
+        } else {
+            consecutiveBlockedReadings++
+            Pair(lock.lastValidSpeed, "lock_blocked")
+        }
+    }
+
+    private fun shouldReleaseRoadLock(
+        location: Triple<Double, Double, Double>,
+        bearing: Float,
+        osmTags: Map<String, String>
+    ): Boolean {
+        val lock = currentRoadLock ?: return false
+
+        if (consecutiveBlockedReadings > MAX_BLOCKS) return true
+
+        val altChange = lastLocationData?.let { location.third - it.third } ?: 0.0
+        val headChange = calculateHeadingChange(bearing)
+
+        return when (lock.mode) {
+            RoadLockMode.SCHOOL_LOCKED -> {
+                val leftSchool = !extractBestRoadName(osmTags).lowercase().contains("school")
+                leftSchool
+            }
+            RoadLockMode.RESIDENTIAL_LOCKED -> {
+                val leftResidential = osmTags["highway"] != "residential"
+                leftResidential && abs(headChange) > 20f
+            }
+            RoadLockMode.BRIDGE_LOCKED -> {
+                val hasAltitudeDrop = altChange < -2.0
+                val hasExitIndicators = hasExitIndicators(osmTags)
+                val leftBridge = osmTags["bridge"] != "yes"
+                (hasAltitudeDrop && hasExitIndicators) || (hasAltitudeDrop && leftBridge)
+            }
+            RoadLockMode.SERVICE_LOCKED -> {
+                val hasTurn = abs(headChange) > 30f
+                val isMainRoad = osmTags["highway"] in listOf("trunk", "primary", "secondary")
+                hasTurn && isMainRoad
+            }
+            RoadLockMode.MAIN_LOCKED -> {
+                val hasTurn = abs(headChange) > 20f
+                val hasBridgeEntry = osmTags["bridge"] == "yes" || altChange > 2.0
+                hasTurn && hasBridgeEntry
+            }
+            RoadLockMode.MOTORWAY_LOCKED -> {
+                hasExitIndicators(osmTags)
+            }
             else -> false
         }
     }
 
-    private fun addToVotingAndCheck(speedLimit: Int, currentSpeed: Float): VotingStatus {
+    private fun hasExitIndicators(osmTags: Map<String, String>): Boolean {
+        val highway = osmTags["highway"] ?: ""
+        val name = extractBestRoadName(osmTags).lowercase()
+        return highway.contains("link") || highway.contains("ramp") ||
+                name.contains("exit") || name.contains("ramp") ||
+                osmTags["junction"]?.isNotEmpty() == true
+    }
+
+    private fun calculateHeadingChange(currentBearing: Float): Float {
+        if (lastBearing == 0f) {
+            lastBearing = currentBearing
+            return 0f
+        }
+        var change = currentBearing - lastBearing
+        while (change > 180f) change -= 360f
+        while (change < -180f) change += 360f
+        lastBearing = currentBearing
+        return change
+    }
+
+    private fun releaseRoadLock(reason: String) {
+        currentRoadLock = null
+        consecutiveBlockedReadings = 0
+    }
+
+    // ===== VOTING SYSTEM =====
+
+    private fun addToVotingAndCheck(
+        speedLimit: Int,
+        currentSpeed: Float,
+        highwayInfo: HighwayInfo
+    ): VotingStatus {
         val currentTime = System.currentTimeMillis()
-        recentReadings.addToEnd(speedLimit)
+        recentReadings.add(speedLimit)
+        if (recentReadings.size > 7) recentReadings.removeFirst()
 
         if (!votingStartTime.containsKey(speedLimit)) {
             votingStartTime[speedLimit] = currentTime
@@ -897,6 +515,8 @@ class StableSpeedLimitManager {
         val timeElapsed = currentTime - oldestVoteTime
 
         val (minVotes, minPercentage, maxTime) = when {
+            highwayInfo.isSchoolZone -> Triple(3, 0.67f, 6000L)
+            highwayInfo.isResidential -> Triple(3, 0.67f, 6000L)
             currentSpeed > 80f -> Triple(3, 0.6f, 4000L)
             currentSpeed > 40f -> Triple(4, 0.7f, 8000L)
             else -> Triple(5, 0.75f, 12000L)
@@ -910,68 +530,178 @@ class StableSpeedLimitManager {
         }
     }
 
-    private fun confirmNewRoadWithHighway(speedLimit: Int, enforcementReason: String, location: Triple<Double, Double, Double>, highwayInfo: HighwayInfo) {
-        if (confirmedSpeedLimit == speedLimit && confirmedEnforcementReason == enforcementReason) {
-            consecutiveSameReadings++
-        } else {
-            consecutiveSameReadings = 1
-            roadConfirmedAt = System.currentTimeMillis()
-            confirmedRoadCenter = Pair(location.first, location.second)
-            confirmedAltitude = location.third
-            confirmedHighwayInfo = highwayInfo
-            confirmedEnforcementReason = enforcementReason
-            recentReadings.clear()
-            votingStartTime.clear()
-        }
+    private fun smoothGPSCoordinates(lat: Double, lon: Double, altitude: Double): Triple<Double, Double, Double> {
+        val point = Triple(lat, lon, altitude)
+        gpsHistory.add(point)
+        if (gpsHistory.size > 3) gpsHistory.removeFirst()
+
+        val avgLat = gpsHistory.map { it.first }.average()
+        val avgLon = gpsHistory.map { it.second }.average()
+        val avgAlt = gpsHistory.map { it.third }.average()
+        return Triple(avgLat, avgLon, avgAlt)
+    }
+
+    private fun confirmNewRoadWithHighway(
+        speedLimit: Int,
+        enforcementReason: String,
+        location: Triple<Double, Double, Double>,
+        highwayInfo: HighwayInfo
+    ) {
         confirmedSpeedLimit = speedLimit
+        confirmedRoadCenter = Pair(location.first, location.second)
+        confirmedAltitude = location.third
+        confirmedHighwayInfo = highwayInfo
+        confirmedEnforcementReason = enforcementReason
+        roadConfirmedAt = System.currentTimeMillis()
+        consecutiveSameReadings = 1
+
+        lastKnownSpeedLimit = speedLimit
+        lastKnownHighwayInfo = highwayInfo
+        lastKnownEnforcementReason = enforcementReason
+        lastKnownLimitTime = System.currentTimeMillis()
+
+        recentReadings.clear()
+        votingStartTime.clear()
     }
 
-    private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val earthRadius = 6371000.0
-        val dLat = toRadians(lat2 - lat1)
-        val dLon = toRadians(lon2 - lon1)
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-                cos(toRadians(lat1)) * cos(toRadians(lat2)) *
-                sin(dLon / 2) * sin(dLon / 2)
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return earthRadius * c
+    private fun handleVotingResult(
+        votingResult: VotingStatus,
+        location: Triple<Double, Double, Double>,
+        highwayInfo: HighwayInfo,
+        enforcementReason: String
+    ): StableSpeedResult {
+        return when (votingResult) {
+            is VotingStatus.Winner -> {
+                confirmNewRoadWithHighway(votingResult.speedLimit, enforcementReason, location, highwayInfo)
+
+                val sendTtl = shouldSendToTtl(votingResult.speedLimit)
+
+                StableSpeedResult.NewConfirmed(
+                    speedLimit = votingResult.speedLimit,
+                    reason = "voting_winner",
+                    votesUsed = votingResult.totalVotes,
+                    timeTaken = votingResult.timeTaken,
+                    altitude = location.third,
+                    highwayInfo = highwayInfo,
+                    enforcementReason = enforcementReason,
+                    sendToTtl = sendTtl,
+                    ttlReason = "new_confirmed"
+                )
+            }
+            is VotingStatus.Collecting -> {
+                val sendTtl = shouldSendToTtl(votingResult.leadingSpeedLimit)
+
+                StableSpeedResult.Voting(
+                    progress = "${votingResult.currentVotes}/votes",
+                    timeElapsed = votingResult.timeElapsed,
+                    leadingCandidate = votingResult.leadingSpeedLimit,
+                    altitude = location.third,
+                    highwayInfo = highwayInfo,
+                    enforcementReason = enforcementReason,
+                    sendToTtl = sendTtl,
+                    ttlReason = "voting_continuous"
+                )
+            }
+        }
     }
 
-    // Public functions
-    fun getCurrentStatus(): Map<String, String> {
-        val confirmedHighway = confirmedHighwayInfo
-        val lastKnownHighway = lastKnownHighwayInfo
-        val lastKnown = getLastKnownSpeedLimit()
-        val confirmedReason = confirmedEnforcementReason
-        val lastKnownReason = lastKnownEnforcementReason
-
-        val lastKnownTime = if (lastKnown != null) {
-            val timeSince = System.currentTimeMillis() - lastKnownLimitTime
-            "${timeSince/1000}s ago"
-        } else "None"
-
-        val lastSentTime = if (lastSentSpeedLimit != null) {
-            val timeSince = System.currentTimeMillis() - lastTtlSendTime
-            "${timeSince/1000}s ago"
-        } else "Never"
-
-        return mapOf(
-            "System" to "FIXED: All Complex Systems Working + IMPROVED Bridge Detection",
-            "Confirmed Speed" to "${confirmedSpeedLimit ?: "None"}km/h${if (confirmedReason != null) " ($confirmedReason)" else ""}",
-            "Confirmed Highway" to (confirmedHighway?.description ?: "None"),
-            "Confirmed Altitude" to "${confirmedAltitude?.let { String.format("%.1f", it) } ?: "None"}m",
-            "Last Known Speed" to "${lastKnown ?: "None"}km/h ($lastKnownTime)${if (lastKnownReason != null) " ($lastKnownReason)" else ""}",
-            "Last Known Highway" to (lastKnownHighway?.description ?: "None"),
-            "Last TTL Sent" to "${lastSentSpeedLimit ?: "None"}km/h ($lastSentTime)",
-            "Verification Mode" to "FIXED: Smart verification with proper reason codes",
-            "Speed Enforcement" to "FIXED: OSM direct or highway defaults",
-            "Speed Jump Detection" to "FIXED: Prevents rapid changes between any speeds",
-            "Bridge Detection" to "IMPROVED: Works for UAE and India OSM data",
-            "TTL Mode" to "Continuous All States (20s interval)"
-        )
+    private fun enforceHighwaySpeed(speedLimit: Int?, highwayInfo: HighwayInfo): Pair<Int, String> {
+        return if (speedLimit != null) {
+            Pair(speedLimit, "osm_speed")
+        } else {
+            Pair(highwayInfo.defaultSpeed, "default_speed")
+        }
     }
+
+    // ===== MAIN FUNCTION =====
+
+    fun getStableSpeedLimit(
+        rawLat: Double,
+        rawLon: Double,
+        rawAltitude: Double,
+        currentSpeed: Float,
+        rawSpeedLimit: Int?,
+        osmTags: Map<String, String> = emptyMap(),
+        bearing: Float = 0f
+    ): StableSpeedResult {
+
+        val location = Triple(rawLat, rawLon, rawAltitude)
+        val highwayInfo = if (osmTags.isNotEmpty()) {
+            analyzeHighway(osmTags)
+        } else {
+            HighwayInfo(
+                type = "UNKNOWN", isHighway = false, priority = 50,
+                description = "UNKNOWN ROAD", icon = "❓",
+                layer = 0, levelType = "GROUND",
+                minSpeedLimit = 0, maxSpeedLimit = 999,
+                defaultSpeed = 50
+            )
+        }
+
+        // Case 1: No OSM data - Use last known and keep sending
+        if (rawSpeedLimit == null) {
+            noDataCount++
+
+            val lastKnown = lastKnownSpeedLimit
+            return if (lastKnown != null) {
+                // FIXED: Always send last known value continuously
+                val sendTtl = shouldSendToTtl(lastKnown)
+
+                StableSpeedResult.UsingLastKnown(
+                    speedLimit = lastKnown,
+                    reason = "no_osm_data",
+                    timeSinceLastKnown = System.currentTimeMillis() - lastKnownLimitTime,
+                    noDataCount = noDataCount,
+                    altitude = rawAltitude,
+                    highwayInfo = lastKnownHighwayInfo ?: highwayInfo,
+                    enforcementReason = lastKnownEnforcementReason ?: "last_known",
+                    sendToTtl = sendTtl,
+                    ttlReason = if (sendTtl) "last_known_continuous" else "last_known_waiting"
+                )
+            } else {
+                StableSpeedResult.NoData
+            }
+        }
+
+        // Case 2: OSM data available
+        noDataCount = 0
+        val smoothLocation = smoothGPSCoordinates(rawLat, rawLon, rawAltitude)
+
+        // Road lock system
+        if (currentRoadLock == null && shouldEstablishRoadLock(osmTags, currentSpeed, location)) {
+            val lockMode = getRoadLockCandidate(osmTags)
+            establishRoadLock(lockMode, rawSpeedLimit, "auto_detect")
+        }
+
+        if (currentRoadLock != null && shouldReleaseRoadLock(location, bearing, osmTags)) {
+            releaseRoadLock("transition_detected")
+        }
+
+        // Filter speed through road lock
+        val (filteredSpeed, lockReason) = filterSpeedByRoadLock(rawSpeedLimit, osmTags)
+        val (enforcedSpeed, enforcementReason) = enforceHighwaySpeed(filteredSpeed, highwayInfo)
+
+        val fullReason = if (currentRoadLock != null) {
+            "${enforcementReason}_${lockReason}"
+        } else {
+            enforcementReason
+        }
+
+        // Voting
+        val votingResult = addToVotingAndCheck(enforcedSpeed, currentSpeed, highwayInfo)
+        return handleVotingResult(votingResult, smoothLocation, highwayInfo, fullReason)
+    }
+
+    // ===== PUBLIC API =====
 
     fun clearAll() {
+        currentRoadLock = null
+        consecutiveBlockedReadings = 0
+        roadLockHistory.clear()
+        lastLocationData = null
+        lastBearing = 0f
+        lastTimestamp = 0L
+
         confirmedSpeedLimit = null
         confirmedRoadCenter = null
         confirmedAltitude = null
@@ -979,14 +709,19 @@ class StableSpeedLimitManager {
         confirmedEnforcementReason = null
         roadConfirmedAt = 0L
         consecutiveSameReadings = 0
+
         recentReadings.clear()
         votingStartTime.clear()
         gpsHistory.clear()
+
         lastKnownSpeedLimit = null
         lastKnownHighwayInfo = null
         lastKnownEnforcementReason = null
         lastKnownLimitTime = 0L
         noDataCount = 0
+
+        lastTtlSendTime = 0L
+        lastSentSpeedLimit = null
 
         isVerifying = false
         pendingSpeedLimit = null
@@ -994,9 +729,6 @@ class StableSpeedLimitManager {
         verificationCount = 0
         requiredVerifications = 3
         verificationInterval = 1000L
-
-        lastTtlSendTime = 0L
-        lastSentSpeedLimit = null
     }
 
     fun hasStableSpeedLimit(): Boolean = confirmedSpeedLimit != null
@@ -1006,26 +738,90 @@ class StableSpeedLimitManager {
     fun getConfirmedEnforcementReason(): String? = confirmedEnforcementReason
     fun getLastKnownSpeedLimit(): Int? = lastKnownSpeedLimit
     fun getLastKnownHighwayInfo(): HighwayInfo? = lastKnownHighwayInfo
-    fun getLastKnownEnforcementReason(): String? = lastKnownEnforcementReason
-    fun canUseLastKnown(): Boolean = lastKnownSpeedLimit != null
+    fun isRoadLocked(): Boolean = currentRoadLock != null
+    fun getCurrentRoadLock(): RoadLockState? = currentRoadLock
 
     fun setLastKnownSpeedLimit(speedLimit: Int) {
         lastKnownSpeedLimit = speedLimit
         lastKnownLimitTime = System.currentTimeMillis()
     }
 
+    fun getCurrentStatus(): Map<String, String> {
+        val lockStatus = currentRoadLock?.let {
+            "${it.mode.name} (Str:${it.lockStrength}, Blocks:$consecutiveBlockedReadings)"
+        } ?: "UNLOCKED"
+
+        val ttlStatus = if (lastSentSpeedLimit != null) {
+            "$lastSentSpeedLimit km/h (${(System.currentTimeMillis() - lastTtlSendTime)/1000}s ago)"
+        } else {
+            "Never sent"
+        }
+
+        return mapOf(
+            "System" to "COMPLETE: All Features + Continuous TTL",
+            "Road Lock" to lockStatus,
+            "Confirmed Speed" to "${confirmedSpeedLimit ?: "None"}km/h",
+            "Highway Type" to (confirmedHighwayInfo?.description ?: "None"),
+            "Road Name" to (confirmedHighwayInfo?.roadName ?: "Unknown"),
+            "Region" to (confirmedHighwayInfo?.region ?: "Unknown"),
+            "Altitude" to "${confirmedAltitude?.let { "%.1f".format(it) } ?: "None"}m",
+            "Last Known" to "${lastKnownSpeedLimit ?: "None"}km/h",
+            "Last TTL Sent" to ttlStatus,
+            "TTL Interval" to "20 seconds continuous"
+        )
+    }
+
+    fun getRoadLockStatus(): Map<String, String> {
+        val lock = currentRoadLock
+        return if (lock != null) {
+            mapOf(
+                "Mode" to lock.mode.name,
+                "Strength" to lock.lockStrength.toString(),
+                "Duration" to "${(System.currentTimeMillis() - lock.lockedAt)/1000}s",
+                "Last Speed" to "${lock.lastValidSpeed ?: "none"}km/h",
+                "Blocks" to "$consecutiveBlockedReadings/$MAX_BLOCKS",
+                "Reason" to lock.lockReason,
+                "History" to "${roadLockHistory.size}/5"
+            )
+        } else {
+            mapOf(
+                "Status" to "UNLOCKED",
+                "Ready" to "Yes",
+                "Available Locks" to "Bridge, Service, Main, Motorway, Residential, School"
+            )
+        }
+    }
+
+    fun getTransitionRules(): Map<String, String> {
+        return mapOf(
+            "Service → Main" to "30°+ turn required",
+            "Bridge Protection" to "Altitude drop + exit ramp needed",
+            "Main → Bridge" to "Altitude gain + bridge indicators",
+            "Motorway Exit" to "Only at exit ramps",
+            "Bridge → Ground" to "Altitude drop AND exit indicators",
+            "Lock Release" to "Auto after $MAX_BLOCKS blocked readings",
+            "Physical Validation" to "Movement and altitude must match road type",
+            "Residential Exit" to "20°+ turn + non-residential road",
+            "School Zone" to "Immediate on name/tag detection"
+        )
+    }
+
     fun getPersistenceConfig(): Map<String, String> {
         return mapOf(
-            "System Type" to "FIXED: All Complex Systems Working + IMPROVED Bridge Detection",
-            "TTL Interval" to "${TTL_SEND_INTERVAL/1000}s (20s)",
-            "Enforcement Logic" to "FIXED: OSM direct or highway defaults",
-            "Speed Jump Detection" to "FIXED: Prevents rapid changes between any speeds",
-            "Highway Stickiness" to "FIXED: High speeds stick for 15s during transitions",
-            "Smart Verification" to "FIXED: Different speeds for OSM vs default transitions",
-            "Reason Codes" to "FIXED: osm_speed, default_speed (consistent)",
-            "Highway Defaults" to "Motorway:80, Trunk:80, Primary:60, Secondary:40, Residential:30",
-            "Bridge Detection" to "IMPROVED: Works for UAE and India (bridge=yes, layer, name-based)",
-            "All Features" to "WORKING: Jump detection, stickiness, verification, TTL, bridge detection"
+            "System" to "COMPLETE: All Features + Continuous TTL",
+            "TTL Interval" to "20 seconds continuous",
+            "TTL Behavior" to "Sends on: first time, speed change, 20s interval",
+            "Bridge Lock" to "0.5 confidence (fixed)",
+            "Main Lock" to "0.6 confidence",
+            "Residential Vote" to "3 votes in 6 seconds",
+            "School Vote" to "3 votes in 6 seconds",
+            "Max Blocks" to "$MAX_BLOCKS before auto-release",
+            "Speed Jump" to "${LARGE_SPEED_JUMP}km/h threshold",
+            "Highway Stick" to "${STICK_TIME/1000}s at high speeds",
+            "Enforcement" to "OSM direct or regional defaults",
+            "Worldwide Support" to "India, UAE, Kenya, and more",
+            "Bridge Detection" to "Name + Tags + Layer + Level",
+            "All Features" to "WORKING ✓"
         )
     }
 
@@ -1045,9 +841,69 @@ class StableSpeedLimitManager {
             VerificationStatus.Inactive
         }
     }
+
+    // ===== NEW FUNCTIONS FOR CONTINUOUS TTL =====
+
+    /**
+     * PUBLIC: Check if TTL should send now (for continuous background sender)
+     * This respects the 20-second interval rule
+     */
+    fun shouldSendTtlNow(currentSpeed: Int): Boolean {
+        val now = System.currentTimeMillis()
+        val timeSinceLastSend = now - lastTtlSendTime
+
+        return when {
+            // First send ever
+            lastSentSpeedLimit == null -> true
+
+            // Speed changed - send immediately
+            lastSentSpeedLimit != currentSpeed -> true
+
+            // Same speed but 20 seconds elapsed
+            timeSinceLastSend >= TTL_SEND_INTERVAL -> true
+
+            // Within 20 second interval - wait
+            else -> false
+        }
+    }
+
+    /**
+     * Get last known speed limit for continuous TTL sending
+     * Returns the most recent valid speed limit
+     */
+    fun getLastKnownSpeedLimitForTtl(): Int? {
+        return lastKnownSpeedLimit ?: confirmedSpeedLimit
+    }
+
+    /**
+     * Get comprehensive TTL status for monitoring
+     */
+    fun getTtlStatus(): Map<String, Any> {
+        val timeSinceLastSend = if (lastTtlSendTime > 0) {
+            (System.currentTimeMillis() - lastTtlSendTime) / 1000
+        } else {
+            -1
+        }
+
+        val nextSendIn = if (lastTtlSendTime > 0) {
+            (20 - timeSinceLastSend).coerceAtLeast(0)
+        } else {
+            0
+        }
+
+        return mapOf(
+            "last_sent_speed" to (lastSentSpeedLimit ?: 0),
+            "time_since_last_send_seconds" to timeSinceLastSend,
+            "next_send_in_seconds" to nextSendIn,
+            "last_known_speed" to (lastKnownSpeedLimit ?: 0),
+            "confirmed_speed" to (confirmedSpeedLimit ?: 0),
+            "has_speed_to_send" to (lastKnownSpeedLimit != null || confirmedSpeedLimit != null)
+        )
+    }
 }
 
-// RESULT TYPES (unchanged but working properly)
+// ===== RESULT TYPES =====
+
 sealed class StableSpeedResult {
     object NoData : StableSpeedResult()
 
@@ -1095,45 +951,6 @@ sealed class StableSpeedResult {
         val enforcementReason: String = "unknown",
         val sendToTtl: Boolean = false,
         val ttlReason: String = "no_osm_continuous"
-    ) : StableSpeedResult()
-
-    data class Verifying(
-        val currentSpeedLimit: Int,
-        val newSpeedLimit: Int,
-        val verificationCount: Int,
-        val requiredVerifications: Int,
-        val nextCheckIn: Long,
-        val altitude: Double = 0.0,
-        val highwayInfo: StableSpeedLimitManager.HighwayInfo? = null,
-        val enforcementReason: String = "unknown",
-        val sendToTtl: Boolean = false,
-        val ttlReason: String = "verification_continuous"
-    ) : StableSpeedResult()
-
-    data class VerificationComplete(
-        val speedLimit: Int,
-        val reason: String,
-        val checksPerformed: Int,
-        val altitude: Double = 0.0,
-        val highwayInfo: StableSpeedLimitManager.HighwayInfo? = null,
-        val enforcementReason: String = "unknown",
-        val sendToTtl: Boolean = false,
-        val ttlReason: String = "verification_complete"
-    ) : StableSpeedResult()
-
-    data class SpeedJumpVerification(
-        val currentSpeedLimit: Int,
-        val newSpeedLimit: Int,
-        val verificationCount: Int,
-        val requiredVerifications: Int,
-        val jumpSize: Int,
-        val drivingSpeed: Float,
-        val nextCheckIn: Long,
-        val altitude: Double = 0.0,
-        val highwayInfo: StableSpeedLimitManager.HighwayInfo? = null,
-        val enforcementReason: String = "unknown",
-        val sendToTtl: Boolean = false,
-        val ttlReason: String = "speed_jump_verification"
     ) : StableSpeedResult()
 }
 

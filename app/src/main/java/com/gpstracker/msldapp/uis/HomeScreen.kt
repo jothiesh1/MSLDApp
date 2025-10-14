@@ -1,16 +1,8 @@
-// File: app/src/main/java/com/gpstracker/msldapp/uis/HomeScreen.kt
-
 package com.gpstracker.msldapp.uis
 
 import android.Manifest
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,7 +10,9 @@ import androidx.annotation.RequiresApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -26,55 +20,64 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.gpstracker.msldapp.R
 
-/**
- * HOME SCREEN - Fixed: Removed frequent TTL toasts
- * Features: Clean card layout, AUTO/CANCEL buttons, GPS control, TTL status
- * Fix: No more "TTL: 40km/h" toasts every 5-10 seconds
- */
 @RequiresApi(Build.VERSION_CODES.N)
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
 
-    // === UI STATE VARIABLES ===
     var currentSpeedLimit by remember { mutableStateOf<Int?>(null) }
     var currentRoadType by remember { mutableStateOf("Ready to Start") }
+    var currentCourse by remember { mutableStateOf<Float?>(null) }
     var isGpsActive by remember { mutableStateOf(false) }
     var autoSendEnabled by remember { mutableStateOf(true) }
     var ttlConnected by remember { mutableStateOf(false) }
 
-    // === ADVANCED BACKEND SYSTEMS ===
-    var lastTtlSendTime by remember { mutableStateOf(0L) }
-    var lastSentSpeedLimit by remember { mutableStateOf<Int?>(null) }
+    var highToLowSeconds by remember { mutableStateOf(20) }
+    var lowToHighSeconds by remember { mutableStateOf(5) }
+    var highToLowMax by remember { mutableStateOf(60) }
+    var lowToHighMax by remember { mutableStateOf(30) }
+    var showMaxValueInputs by remember { mutableStateOf(false) }
+    var highToLowMaxText by remember { mutableStateOf("60") }
+    var lowToHighMaxText by remember { mutableStateOf("30") }
+    var lockedHighToLow by remember { mutableStateOf(20) }
+    var lockedLowToHigh by remember { mutableStateOf(5) }
+    var isIntervalLocked by remember { mutableStateOf(false) }
+    var showIntervalSettings by remember { mutableStateOf(false) }
 
-    // Complete systems from DashboardScreen
-    val speedLookup = remember {
-        try {
-            OsmJsonSpeedLookup(context)
-        } catch (e: Exception) {
-            LogCollector.logError("Failed to initialize JSON OSM lookup", e)
-            null
-        }
-    }
+    var ttlSendSuccessCount by remember { mutableStateOf(0) }
+    var ttlSendFailureCount by remember { mutableStateOf(0) }
+    var lastTtlSentSpeed by remember { mutableStateOf<Int?>(null) }
+    var lastTtlSentTime by remember { mutableStateOf<Long?>(null) }
 
-    val stableManager = remember { StableSpeedLimitManager() }
+    // TTL CONTINUOUS SENDER STATE
+    var ttlBackgroundSenderActive by remember { mutableStateOf(false) }
+    var currentSpeedToSend by remember { mutableStateOf<Int?>(null) }
+    var nextTtlSendIn by remember { mutableStateOf(0) }
 
+    // AUTO REFRESH SETTINGS
+    var autoRefreshEnabled by remember { mutableStateOf(true) }
+    var autoRefreshIntervalMinutes by remember { mutableStateOf(10) }
+    var lastRefreshTime by remember { mutableStateOf(0L) }
+    var nextRefreshIn by remember { mutableStateOf(0) }
+    var showRefreshSettings by remember { mutableStateOf(false) }
+
+    val coordinator = remember { SpeedLimitCoordinator(context) }
     val gpsManager = remember {
         try {
             GPSLocationManager(context)
@@ -84,289 +87,332 @@ fun HomeScreen() {
         }
     }
 
-    // Advanced backend states
-    var error by remember { mutableStateOf<String?>(null) }
-    var currentLocation by remember { mutableStateOf<LocationData?>(null) }
+    LaunchedEffect(lockedHighToLow, lockedLowToHigh) {
+        gpsManager?.setHighToLowInterval(lockedHighToLow)
+        gpsManager?.setLowToHighInterval(lockedLowToHigh)
+    }
+
     var isLookingUpSpeedLimit by remember { mutableStateOf(false) }
-    var lastRegion by remember { mutableStateOf("Unknown") }
-    var currentHighwayInfo by remember { mutableStateOf<StableSpeedLimitManager.HighwayInfo?>(null) }
-    var currentAltitude by remember { mutableStateOf(0.0) }
-    var currentCarDirection by remember { mutableStateOf<Float?>(null) }
-    var isSpeedJumpVerifying by remember { mutableStateOf(false) }
     var consecutiveFailures by remember { mutableStateOf(0) }
     var lastSuccessfulLookup by remember { mutableStateOf(0L) }
-    var ttlSendFailures by remember { mutableStateOf(0) }
-    var showBatteryOptimizationDialog by remember { mutableStateOf(false) }
 
-    // === PERMISSION LAUNCHER ===
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
         val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
-
         if (fineGranted && coarseGranted) {
-            LogCollector.addDetailedLog(LogCollector.LogCategory.PERMISSION, "✅ Location permissions granted")
             isGpsActive = true
         } else {
-            LogCollector.addDetailedLog(LogCollector.LogCategory.PERMISSION, "❌ Location permissions denied")
-            Toast.makeText(context, "🔑 Location permission required", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Location permission required", Toast.LENGTH_LONG).show()
         }
     }
 
-    // === TTL CONNECTION SETUP ===
     LaunchedEffect(Unit) {
-        try {
-            LogCollector.addDetailedLog(LogCollector.LogCategory.BACKEND, "🔌 Initializing TTL connection...")
-            delay(1000)
-
-            val success = SerialTtlManager.init(context)
-            ttlConnected = success
-
-            if (success && autoSendEnabled) {
-                Toast.makeText(context, "🚀 TTL Connected & Auto Mode ON", Toast.LENGTH_LONG).show()
-            } else if (!success) {
-                Toast.makeText(context, "⚠️ Connect TTL device", Toast.LENGTH_LONG).show()
-            }
-        } catch (e: Exception) {
-            LogCollector.logError("TTL Init Error", e)
+        delay(1000)
+        val success = SerialTtlManager.init(context)
+        ttlConnected = success
+        if (success && autoSendEnabled) {
+            Toast.makeText(context, "TTL Connected & Auto Mode ON", Toast.LENGTH_LONG).show()
         }
     }
 
-    // === TTL MONITORING ===
     LaunchedEffect(Unit) {
         while (true) {
             delay(2000)
             val wasConnected = ttlConnected
             val isConnected = SerialTtlManager.isConnected
             ttlConnected = isConnected
-
             if (wasConnected != isConnected) {
-                if (isConnected) {
-                    Toast.makeText(context, "✅ TTL Connected", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "❌ TTL Disconnected", Toast.LENGTH_SHORT).show()
-                }
+                Toast.makeText(
+                    context,
+                    if (isConnected) "TTL Connected" else "TTL Disconnected",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
 
-    // === ENHANCED TTL SENDING (FIXED: NO MORE FREQUENT TOASTS) ===
     suspend fun sendTtlWithRetry(speedLimitToSend: Int, reason: String): Boolean {
         var attempts = 0
         var sendSuccess = false
 
+        Log.d("HomeScreen", "Attempting to send TTL: $speedLimitToSend km/h (reason: $reason)")
+
         while (attempts < 3 && !sendSuccess) {
             try {
-                // 🔧 FIXED: Pass null context to prevent toast spam
-                val bytesWritten = SerialTtlManager.sendSpeed(speedLimitToSend, null)
-                sendSuccess = bytesWritten == 1
+                Log.d("HomeScreen", "TTL send attempt ${attempts + 1}/3")
+                sendSuccess = SerialTtlManager.sendSpeed(speedLimitToSend, context)
 
                 if (sendSuccess) {
-                    ttlSendFailures = 0
-                    LogCollector.addDetailedLog(
-                        LogCollector.LogCategory.BACKEND,
-                        "✅ TTL SUCCESS: ${speedLimitToSend}km/h ($reason) - Silent mode"
-                    )
-                    stableManager.recordTtlSent(speedLimitToSend)
-                    lastTtlSendTime = System.currentTimeMillis()
-                    lastSentSpeedLimit = speedLimitToSend
+                    ttlSendSuccessCount++
+                    ttlSendFailureCount = 0
+                    lastTtlSentSpeed = speedLimitToSend
+                    lastTtlSentTime = System.currentTimeMillis()
+                    coordinator.recordTtlSent(speedLimitToSend)
+
+                    Log.d("HomeScreen", "TTL sent successfully: $speedLimitToSend (attempt ${attempts + 1})")
+                    break
                 } else {
                     attempts++
-                    ttlSendFailures++
+                    ttlSendFailureCount++
+                    Log.w("HomeScreen", "TTL send failed, attempt $attempts/3")
                     if (attempts < 3) delay(1000)
                 }
             } catch (e: Exception) {
                 attempts++
-                ttlSendFailures++
-                LogCollector.logError("❌ TTL send attempt $attempts failed", e)
+                ttlSendFailureCount++
+                Log.e("HomeScreen", "TTL send exception: ${e.message}", e)
                 if (attempts < 3) delay(1000)
             }
         }
+
+        if (!sendSuccess) {
+            Log.e("HomeScreen", "TTL send failed after $attempts attempts: $speedLimitToSend")
+        }
+
         return sendSuccess
     }
 
-    // === ENHANCED OSM LOOKUP ===
-    suspend fun lookupSpeedLimitWithRetry(
-        lat: Double, lon: Double, speed: Float,
-        carDirection: Float? = null, altitude: Double? = null
-    ): Pair<SpeedLimitResult?, Map<String, String>> {
-        var attempts = 0
-        var result: SpeedLimitResult? = null
-        var osmTags = emptyMap<String, String>()
-
-        while (attempts < 3 && result == null) {
+    fun performSoftRefresh() {
+        scope.launch {
             try {
-                result = speedLookup?.findSpeedLimit(lat, lon, speed, carDirection, altitude)
-                if (result != null) {
-                    osmTags = speedLookup?.getLastOsmTags() ?: emptyMap()
-                    consecutiveFailures = 0
-                    lastSuccessfulLookup = System.currentTimeMillis()
-                    return Pair(result, osmTags)
-                }
+                Log.d("HomeScreen", "Performing soft refresh...")
+                lastRefreshTime = System.currentTimeMillis()
+                coordinator.clearAll()
+                Toast.makeText(context, "Soft refresh completed", Toast.LENGTH_SHORT).show()
+                Log.d("HomeScreen", "Soft refresh completed")
             } catch (e: Exception) {
-                LogCollector.logError("❌ OSM lookup attempt ${attempts + 1} failed", e)
+                Log.e("HomeScreen", "Soft refresh error: ${e.message}", e)
+                Toast.makeText(context, "Soft refresh failed", Toast.LENGTH_SHORT).show()
             }
-            attempts++
-            if (attempts < 3 && result == null) delay(500)
         }
-
-        consecutiveFailures++
-        return Pair(null, emptyMap())
     }
 
-    // === BATTERY OPTIMIZATION CHECK ===
-    fun isBatteryOptimizationDisabled(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    fun performHardRefresh() {
+        scope.launch {
+            try {
+                Log.d("HomeScreen", "Performing hard refresh...")
+                lastRefreshTime = System.currentTimeMillis()
+
+                val wasActive = isGpsActive
+                if (isGpsActive) {
+                    isGpsActive = false
+                    delay(500)
+                }
+
+                coordinator.clearAll()
+                gpsManager?.resetKalmanFilter()
+
+                ttlSendSuccessCount = 0
+                ttlSendFailureCount = 0
+                lastTtlSentSpeed = null
+                lastTtlSentTime = null
+
+                currentSpeedLimit = null
+                currentRoadType = "System Reset"
+                consecutiveFailures = 0
+
+                delay(1000)
+
+                if (wasActive) {
+                    isGpsActive = true
+                }
+
+                Toast.makeText(context, "Hard refresh completed", Toast.LENGTH_LONG).show()
+                Log.d("HomeScreen", "Hard refresh completed")
+            } catch (e: Exception) {
+                Log.e("HomeScreen", "Hard refresh error: ${e.message}", e)
+                Toast.makeText(context, "Hard refresh failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // ============================================================
+    // CONTINUOUS TTL SENDER - RUNS INDEPENDENTLY OF GPS
+    // ============================================================
+    LaunchedEffect(autoSendEnabled, ttlConnected) {
+        if (autoSendEnabled && ttlConnected) {
+            ttlBackgroundSenderActive = true
+            Log.d("HomeScreen", "===== TTL CONTINUOUS SENDER STARTED =====")
+
+            while (autoSendEnabled && ttlConnected) {
+                try {
+                    // Get speed to send (current or last known)
+                    val speedToSend = currentSpeedToSend
+                        ?: coordinator.getLastKnownSpeedLimit()
+                        ?: currentSpeedLimit
+
+                    if (speedToSend != null) {
+                        val clampedSpeed = speedToSend.coerceIn(0, 140)
+
+                        // Calculate time since last send
+                        val timeSinceLastSend = if (lastTtlSentTime != null) {
+                            (System.currentTimeMillis() - lastTtlSentTime!!) / 1000
+                        } else {
+                            999 // Force first send
+                        }
+
+                        // Update countdown
+                        nextTtlSendIn = (20 - timeSinceLastSend).toInt().coerceAtLeast(0)
+
+                        // Send if 20 seconds elapsed OR speed changed
+                        val shouldSend = timeSinceLastSend >= 20 ||
+                                (lastTtlSentSpeed != null && lastTtlSentSpeed != clampedSpeed)
+
+                        if (shouldSend) {
+                            Log.d("HomeScreen", "TTL Background: Sending $clampedSpeed km/h (${timeSinceLastSend}s since last)")
+
+                            val sent = sendTtlWithRetry(clampedSpeed, "continuous_background")
+
+                            if (sent) {
+                                Log.d("HomeScreen", "TTL Background: SUCCESS - $clampedSpeed km/h")
+                            } else {
+                                Log.w("HomeScreen", "TTL Background: FAILED - $clampedSpeed km/h")
+                            }
+                        }
+                    } else {
+                        Log.d("HomeScreen", "TTL Background: No speed available, waiting...")
+                        nextTtlSendIn = 0
+                    }
+
+                    // Check every 1 second
+                    delay(1000)
+
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("HomeScreen", "TTL Background error: ${e.message}", e)
+                    delay(2000)
+                }
+            }
+
+            ttlBackgroundSenderActive = false
+            nextTtlSendIn = 0
+            Log.d("HomeScreen", "===== TTL CONTINUOUS SENDER STOPPED =====")
+        }
+    }
+
+    // Auto-refresh timer
+    LaunchedEffect(isGpsActive, autoRefreshEnabled, autoRefreshIntervalMinutes, ttlSendSuccessCount) {
+        val shouldStartTimer = (isGpsActive || ttlSendSuccessCount > 0) && autoRefreshEnabled
+
+        if (shouldStartTimer) {
+            if (lastRefreshTime == 0L) {
+                lastRefreshTime = System.currentTimeMillis()
+                Log.d("HomeScreen", "Auto-refresh timer started")
+            }
+
+            while ((isGpsActive || ttlSendSuccessCount > 0) && autoRefreshEnabled) {
+                delay(1000)
+
+                val elapsed = (System.currentTimeMillis() - lastRefreshTime) / 1000
+                val intervalSeconds = autoRefreshIntervalMinutes * 60
+                nextRefreshIn = (intervalSeconds - elapsed).toInt()
+
+                if (nextRefreshIn <= 0) {
+                    Log.d("HomeScreen", "Auto-refresh triggered after $autoRefreshIntervalMinutes minutes")
+                    performSoftRefresh()
+                    lastRefreshTime = System.currentTimeMillis()
+                }
+            }
         } else {
-            true // Not applicable for older versions
+            if (!isGpsActive && ttlSendSuccessCount == 0) {
+                lastRefreshTime = 0L
+                nextRefreshIn = 0
+            }
         }
     }
 
-    // === COMPLETE GPS TRACKING ===
+    // GPS location updates - Updates speed value only
     LaunchedEffect(isGpsActive) {
         if (isGpsActive && gpsManager?.hasLocationPermission() == true) {
             gpsManager.startLocationTracking()
-
-            // Check battery optimization in a safer way
-            if (!isBatteryOptimizationDisabled()) {
-                delay(2000) // Give user time to see GPS is starting
-                showBatteryOptimizationDialog = true
-            }
-
-            LogCollector.addDetailedLog(LogCollector.LogCategory.GPS, "🛣️ Advanced GPS tracking started")
-
             try {
                 gpsManager.getLocationUpdates().collect { location ->
-                    try {
-                        currentLocation = location
-                        currentAltitude = location.altitude
-                        currentCarDirection = location.carDirection
+                    if (!isLookingUpSpeedLimit) {
+                        isLookingUpSpeedLimit = true
+                        scope.launch {
+                            try {
+                                val result = coordinator.getAbsolutelyAccurateSpeedLimit(
+                                    location.latitude,
+                                    location.longitude,
+                                    location.altitude,
+                                    location.speedKmh,
+                                    location.carDirection ?: 0f
+                                )
 
-                        if (!isLookingUpSpeedLimit && speedLookup != null) {
-                            isLookingUpSpeedLimit = true
+                                currentSpeedLimit = result.speedLimit
+                                currentRoadType = result.roadType
+                                currentCourse = location.carDirection
 
-                            scope.launch {
-                                try {
-                                    val (rawSpeedInfo, osmTags) = lookupSpeedLimitWithRetry(
-                                        location.latitude, location.longitude, location.speedKmh,
-                                        location.carDirection, location.altitude
-                                    )
+                                // UPDATE speed for background sender
+                                currentSpeedToSend = result.speedLimit
 
-                                    val stableResult = stableManager.getStableSpeedLimit(
-                                        location.latitude, location.longitude, location.altitude,
-                                        location.speedKmh, rawSpeedInfo?.speedLimit, osmTags
-                                    )
+                                // Optional: Send immediately on speed change
+                                if (result.sendToTtl && autoSendEnabled && ttlConnected) {
+                                    val speedToSend = (result.speedLimit ?: 0).coerceAtMost(140)
 
-                                    when (stableResult) {
-                                        is StableSpeedResult.Confirmed -> {
-                                            currentSpeedLimit = stableResult.speedLimit
-                                            currentRoadType = stableResult.highwayInfo?.description ?: "Road Confirmed"
-                                            if (stableResult.sendToTtl && autoSendEnabled && ttlConnected) {
-                                                val speedToSend = if (stableResult.speedLimit > 140) 140 else stableResult.speedLimit
-                                                sendTtlWithRetry(speedToSend, "stable")
-                                            }
-                                        }
-                                        is StableSpeedResult.NewConfirmed -> {
-                                            currentSpeedLimit = stableResult.speedLimit
-                                            currentRoadType = "${stableResult.highwayInfo?.description ?: "Road"} - New"
-                                            if (stableResult.sendToTtl && autoSendEnabled && ttlConnected) {
-                                                val speedToSend = if (stableResult.speedLimit > 140) 140 else stableResult.speedLimit
-                                                sendTtlWithRetry(speedToSend, "new")
-                                            }
-                                        }
-                                        is StableSpeedResult.Voting -> {
-                                            currentSpeedLimit = stableResult.leadingCandidate
-                                            currentRoadType = "${stableResult.highwayInfo?.description ?: "Road"} - Analyzing"
-                                            if (stableResult.sendToTtl && autoSendEnabled && ttlConnected) {
-                                                val speedToSend = if (stableResult.leadingCandidate > 140) 140 else stableResult.leadingCandidate
-                                                sendTtlWithRetry(speedToSend, "voting")
-                                            }
-                                        }
-                                        is StableSpeedResult.UsingLastKnown -> {
-                                            currentSpeedLimit = stableResult.speedLimit
-                                            currentRoadType = "${stableResult.highwayInfo?.description ?: "Road"} - Last Known"
-                                            if (stableResult.sendToTtl && autoSendEnabled && ttlConnected) {
-                                                val speedToSend = if (stableResult.speedLimit > 140) 140 else stableResult.speedLimit
-                                                sendTtlWithRetry(speedToSend, "last_known")
-                                            }
-                                        }
-                                        else -> {
-                                            if (currentSpeedLimit == null) {
-                                                currentRoadType = "Detecting..."
-                                            }
-                                        }
+                                    if (lastTtlSentSpeed != speedToSend) {
+                                        Log.d("HomeScreen", "Speed changed: Immediate send $speedToSend")
+                                        sendTtlWithRetry(speedToSend, result.enforcementReason)
                                     }
-
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (e: Exception) {
-                                    LogCollector.logError("❌ Speed lookup error", e)
-                                } finally {
-                                    delay(100)
-                                    isLookingUpSpeedLimit = false
                                 }
+
+                                consecutiveFailures = 0
+                                lastSuccessfulLookup = System.currentTimeMillis()
+
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                LogCollector.logError("Speed lookup error", e)
+                                consecutiveFailures++
+                            } finally {
+                                delay(100)
+                                isLookingUpSpeedLimit = false
                             }
                         }
-                    } catch (e: Exception) {
-                        LogCollector.logError("❌ Location processing error", e)
                     }
                 }
             } catch (e: Exception) {
-                LogCollector.logError("❌ GPS tracking error", e)
+                LogCollector.logError("GPS tracking error", e)
                 isGpsActive = false
             } finally {
                 gpsManager.stopLocationTracking()
             }
-
         } else if (!isGpsActive) {
             gpsManager?.stopLocationTracking()
             currentSpeedLimit = null
             currentRoadType = "GPS Stopped"
+            // Don't clear currentSpeedToSend - keep sending last known
         }
     }
 
-    // === YOUR REQUESTED UI STYLE ===
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFFE8F5E8),  // Very light green
-                        Color(0xFFF1F8E9),  // Soft green tint
-                        Color(0xFFF8FDF8),  // Almost white with green hint
-                        Color(0xFFEBF4EB)   // Light green bottom
-                    )
+                    listOf(Color(0xFFE8F5E8), Color(0xFFF1F8E9), Color(0xFFF8FDF8), Color(0xFFEBF4EB))
                 )
             )
+            .verticalScroll(scrollState)
             .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-
-        // LOGO
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer
-            ),
+            colors = CardDefaults.cardColors(MaterialTheme.colorScheme.primaryContainer),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+            Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Image(
                     painter = painterResource(id = R.mipmap.ic_launcher_foreground),
                     contentDescription = "Thinture Logo",
                     modifier = Modifier.size(100.dp)
                 )
-
                 Text(
-                    text = "Thinture MSLD",
+                    "Thinture MSLD",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
@@ -375,64 +421,305 @@ fun HomeScreen() {
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(Modifier.height(24.dp))
 
-        // SPEED LIMIT DISPLAY
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Card(
+                modifier = Modifier
+                    .width(295.dp)
+                    .height(175.dp),
+                colors = CardDefaults.cardColors(
+                    when (currentSpeedLimit) {
+                        null -> Color(0xFFF5F5F5)
+                        in 0..30 -> Color(0xFFE8F5E9)
+                        in 31..60 -> Color(0xFFFFF3E0)
+                        else -> Color(0xFFFFEBEE)
+                    }
+                ),
+                shape = RoundedCornerShape(24.dp),
+                elevation = CardDefaults.cardElevation(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "SPEED LIMIT",
+                            fontSize = 14.sp,
+                            color = Color.Gray,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 1.sp
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (currentSpeedLimit != null) "$currentSpeedLimit" else "--",
+                            fontSize = 80.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = when (currentSpeedLimit) {
+                                null -> Color.Gray
+                                in 0..30 -> Color(0xFF4CAF50)
+                                in 31..60 -> Color(0xFFFF9800)
+                                else -> Color(0xFFF44336)
+                            }
+                        )
+                        Text(
+                            "km/h",
+                            fontSize = 16.sp,
+                            color = Color.Gray,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.width(16.dp))
+        }
+
+        Spacer(Modifier.height(12.dp))
+
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFFF5F5F5)
-            ),
+            colors = CardDefaults.cardColors(Color(0xFFF5F5F5)),
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "Speed Limit",
-                    fontSize = 18.sp,
-                    color = Color.Gray
-                )
-
-                Text(
-                    text = if (currentSpeedLimit != null) "${currentSpeedLimit} km/h" else "-- km/h",
-                    fontSize = 48.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = currentRoadType,
-                    fontSize = 16.sp,
+                    currentRoadType,
+                    fontSize = 15.sp,
                     color = Color.Gray,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    maxLines = 2
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
 
-        // GPS STATUS
+        // COMMENTED OUT: TTL CONTINUOUS MONITOR CARD
+        /*
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = if (isGpsActive)
-                    Color(0xFFE8F5E8) else Color(0xFFFFEBEE)
+                if (ttlBackgroundSenderActive) Color(0xFFE8F5E9) else Color(0xFFFFF9E6)
+            ),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "TTL Continuous Sender",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = if (ttlBackgroundSenderActive) Color(0xFF2E7D32) else Color.Gray
+                            )
+                            if (ttlBackgroundSenderActive) {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = "Active",
+                                    tint = Color(0xFF4CAF50),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            if (ttlBackgroundSenderActive) "Sending every 20 seconds"
+                            else "Enable AUTO + Connect TTL",
+                            fontSize = 12.sp,
+                            color = if (ttlBackgroundSenderActive) Color(0xFF4CAF50) else Color.Gray
+                        )
+                    }
+                }
+
+                if (ttlBackgroundSenderActive) {
+                    Spacer(Modifier.height(12.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Current Speed:", fontSize = 13.sp, color = Color.Gray)
+                        Text(
+                            "${currentSpeedToSend ?: "None"} km/h",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF2E7D32)
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+
+                    if (lastTtlSentSpeed != null && lastTtlSentTime != null) {
+                        val secondsAgo = (System.currentTimeMillis() - lastTtlSentTime!!) / 1000
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Last Sent:", fontSize = 13.sp, color = Color.Gray)
+                            Text(
+                                "$lastTtlSentSpeed km/h (${secondsAgo}s ago)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1976D2)
+                            )
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Next Send:", fontSize = 13.sp, color = Color.Gray)
+                            Text(
+                                if (nextTtlSendIn > 0) "${nextTtlSendIn}s" else "Now",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (nextTtlSendIn > 0) Color(0xFFFF9800) else Color(0xFF4CAF50)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(Color(0xFFF5F5F5))
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Success", fontSize = 14.sp, color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
+                                Text(
+                                    "$ttlSendSuccessCount",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4CAF50)
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Failed", fontSize = 14.sp, color = Color(0xFFF44336), fontWeight = FontWeight.Bold)
+                                Text(
+                                    "$ttlSendFailureCount",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFF44336)
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Rate", fontSize = 14.sp, color = Color(0xFF2196F3), fontWeight = FontWeight.Bold)
+                                val total = ttlSendSuccessCount + ttlSendFailureCount
+                                val rate = if (total > 0) (ttlSendSuccessCount * 100 / total) else 0
+                                Text(
+                                    "$rate%",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF2196F3)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (ttlBackgroundSenderActive && currentSpeedToSend != null) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = Color(0xFF4CAF50),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Sending continuously - NO GAPS",
+                            fontSize = 12.sp,
+                            color = Color(0xFF4CAF50),
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else if (ttlBackgroundSenderActive && currentSpeedToSend == null) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = Color(0xFFFF9800),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Waiting for speed data",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFF9800),
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = Color.Gray,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Inactive - Enable AUTO and connect TTL",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        */
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                if (isGpsActive) Color(0xFFE8F5E8) else Color(0xFFFFEBEE)
             )
         ) {
-            Row(
-                modifier = Modifier.padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (isGpsActive) "🟢 GPS Active" else "🔴 GPS Stopped",
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (isGpsActive) "GPS Active" else "GPS Stopped",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    if (consecutiveFailures > 0) {
+                        Text(
+                            "Lookup failures: $consecutiveFailures",
+                            fontSize = 12.sp,
+                            color = Color.Red
+                        )
+                    }
+                }
                 Button(
                     onClick = {
                         if (gpsManager?.hasLocationPermission() == true) {
@@ -447,8 +734,7 @@ fun HomeScreen() {
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isGpsActive)
-                            MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        if (isGpsActive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                     )
                 ) {
                     Text(if (isGpsActive) "Stop" else "Start")
@@ -456,198 +742,639 @@ fun HomeScreen() {
             }
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(Modifier.height(20.dp))
 
-        // AUTO / CANCEL BUTTONS
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // AUTO BUTTON
-            Button(
-                onClick = {
-                    autoSendEnabled = true
-                    Toast.makeText(context, "✅ Auto mode enabled - New speeds will be sent automatically", Toast.LENGTH_SHORT).show()
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (autoSendEnabled)
-                        MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(8.dp)
-                ) {
-                    Text(
-                        text = "AUTO",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Accept New Speeds",
-                        fontSize = 12.sp
-                    )
-                }
-            }
-
-            // CANCEL BUTTON
-            Button(
-                onClick = {
-                    autoSendEnabled = false
-                    Toast.makeText(context, "❌ Auto mode disabled - New speeds will NOT be sent", Toast.LENGTH_SHORT).show()
-                },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (!autoSendEnabled)
-                        MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(8.dp)
-                ) {
-                    Text(
-                        text = "CANCEL",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Stop Sending Speeds",
-                        fontSize = 12.sp
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // TTL STATUS (FIXED: No more frequent toasts)
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = if (ttlConnected)
-                    Color(0xFFE8F5E8) else Color(0xFFFFEBEE)
-            )
+                if (isIntervalLocked) Color(0xFFE8F5E9) else Color(0xFFFFF9E6)
+            ),
+            shape = RoundedCornerShape(16.dp)
         ) {
-            Text(
-                text = if (ttlConnected)
-                    "🔗 TTL Connected (Silent Mode)" else "❌ TTL Disconnected",
-                modifier = Modifier.padding(16.dp),
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-        }
-
-        // 🔧 OPTIONAL: Uncomment to show last sent info without frequent toasts
-        /*
-        if (lastSentSpeedLimit != null) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F5E8))
-            ) {
-                Text(
-                    text = "Last sent: ${lastSentSpeedLimit}km/h • ${(System.currentTimeMillis() - lastTtlSendTime) / 1000}s ago",
-                    modifier = Modifier.padding(16.dp),
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
-                    color = Color(0xFF2E7D32)
-                )
-            }
-        }
-        */
-    }
-
-    // === IMPROVED BATTERY OPTIMIZATION DIALOG ===
-    if (showBatteryOptimizationDialog) {
-        AlertDialog(
-            onDismissRequest = { showBatteryOptimizationDialog = false },
-            title = {
+            Column(Modifier.padding(16.dp)) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.BatteryAlert,
-                        contentDescription = null,
-                        tint = Color(0xFFF59E0B),
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Battery Optimization",
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF374151)
-                    )
-                }
-            },
-            text = {
-                Column {
-                    Text(
-                        "To ensure reliable GPS tracking and TTL communication, please disable battery optimization for this app.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color(0xFF374151)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        "• Prevents Android from stopping the app in background\n" +
-                                "• Ensures continuous speed limit detection\n" +
-                                "• Maintains TTL device connectivity",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF6B7280)
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                                context.startActivity(intent)
-                            }
-                        } catch (e: Exception) {
-                            try {
-                                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                context.startActivity(intent)
-                            } catch (e2: Exception) {
-                                Toast.makeText(context, "Settings not available", Toast.LENGTH_SHORT).show()
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "GPS Update Intervals",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = if (isIntervalLocked) Color(0xFF2E7D32) else Color(0xFF6D4C41)
+                            )
+                            if (isIntervalLocked) {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = "Locked",
+                                    tint = Color(0xFF2E7D32),
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
-                        showBatteryOptimizationDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+
+
+
+
+
+
+
+
+
+
+                                    Text(
+                                    if (isIntervalLocked) "Locked: ${lockedHighToLow}s / ${lockedLowToHigh}s"
+                                    else "Adjust with fine control",
+                            fontSize = 12.sp,
+                            color = Color.Gray
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Open Settings", color = Color.White)
+                    }
+                    IconButton(onClick = { showIntervalSettings = !showIntervalSettings }) {
+                        Icon(
+                            if (showIntervalSettings) Icons.Default.KeyboardArrowUp
+                            else Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Toggle",
+                            tint = if (isIntervalLocked) Color(0xFF2E7D32) else Color(0xFF6D4C41)
+                        )
                     }
                 }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { showBatteryOptimizationDialog = false },
-                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF6B7280))
-                ) {
-                    Text("Later")
+
+                if (showIntervalSettings) {
+                    Spacer(Modifier.height(16.dp))
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(Color(0xFFE8F5F9)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "System Refresh",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 16.sp,
+                                            color = Color(0xFF01579B)
+                                        )
+                                        if (autoRefreshEnabled && isGpsActive) {
+                                            Spacer(Modifier.width(8.dp))
+                                            Icon(
+                                                Icons.Default.Refresh,
+                                                contentDescription = "Auto Refresh",
+                                                tint = Color(0xFF4CAF50),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                    if (autoRefreshEnabled && isGpsActive && nextRefreshIn > 0) {
+                                        val minutes = nextRefreshIn / 60
+                                        val seconds = nextRefreshIn % 60
+                                        Text(
+                                            "Next refresh in: ${minutes}m ${seconds}s",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF4CAF50),
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    } else if (autoRefreshEnabled && ttlSendSuccessCount > 0 && nextRefreshIn > 0) {
+                                        val minutes = nextRefreshIn / 60
+                                        val seconds = nextRefreshIn % 60
+                                        Text(
+                                            "Next refresh in: ${minutes}m ${seconds}s (TTL active)",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF4CAF50),
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    } else {
+                                        Text(
+                                            "Starts with GPS or TTL sending",
+                                            fontSize = 12.sp,
+                                            color = Color.Gray
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { showRefreshSettings = !showRefreshSettings }) {
+                                    Icon(
+                                        if (showRefreshSettings) Icons.Default.KeyboardArrowUp
+                                        else Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Toggle",
+                                        tint = Color(0xFF01579B)
+                                    )
+                                }
+                            }
+
+                            if (showRefreshSettings) {
+                                Spacer(Modifier.height(16.dp))
+                                HorizontalDivider()
+                                Spacer(Modifier.height(16.dp))
+
+                                Text("Manual Refresh", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Clear cache and reset system", fontSize = 11.sp, color = Color.Gray)
+                                Spacer(Modifier.height(8.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Button(
+                                        onClick = { performSoftRefresh() },
+                                        modifier = Modifier.weight(1f),
+                                        colors = ButtonDefaults.buttonColors(Color(0xFF2196F3))
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Soft", fontSize = 13.sp)
+                                    }
+                                    Button(
+                                        onClick = { performHardRefresh() },
+                                        modifier = Modifier.weight(1f),
+                                        colors = ButtonDefaults.buttonColors(Color(0xFFFF5722))
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Hard", fontSize = 13.sp)
+                                    }
+                                }
+
+                                Spacer(Modifier.height(16.dp))
+                                HorizontalDivider()
+                                Spacer(Modifier.height(16.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Auto Refresh", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            if (autoRefreshEnabled) "Starts with GPS or TTL" else "Disabled",
+                                            fontSize = 11.sp,
+                                            color = if (autoRefreshEnabled) Color(0xFF4CAF50) else Color.Gray
+                                        )
+                                    }
+                                    Switch(
+                                        checked = autoRefreshEnabled,
+                                        onCheckedChange = {
+                                            autoRefreshEnabled = it
+                                            if (it) {
+                                                lastRefreshTime = System.currentTimeMillis()
+                                                Toast.makeText(
+                                                    context,
+                                                    "Auto-refresh enabled: Every $autoRefreshIntervalMinutes minutes",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                Toast.makeText(context, "Auto-refresh disabled", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color(0xFF4CAF50),
+                                            checkedTrackColor = Color(0xFFC8E6C9)
+                                        )
+                                    )
+                                }
+
+                                if (autoRefreshEnabled) {
+                                    Spacer(Modifier.height(16.dp))
+
+                                    Text("Refresh Interval", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("How often to auto-refresh (1-60 minutes)", fontSize = 11.sp, color = Color.Gray)
+                                    Spacer(Modifier.height(8.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Slider(
+                                            value = autoRefreshIntervalMinutes.toFloat(),
+                                            onValueChange = { autoRefreshIntervalMinutes = it.toInt() },
+                                            valueRange = 1f..60f,
+                                            steps = 58,
+                                            modifier = Modifier.weight(1f),
+                                            colors = SliderDefaults.colors(
+                                                thumbColor = Color(0xFF2196F3),
+                                                activeTrackColor = Color(0xFF2196F3)
+                                            )
+                                        )
+                                        Text(
+                                            "${autoRefreshIntervalMinutes}m",
+                                            modifier = Modifier.width(50.dp),
+                                            textAlign = TextAlign.End,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 16.sp,
+                                            color = Color(0xFF2196F3)
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.height(12.dp))
+
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(Color(0xFFF5F5F5))
+                                ) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Default.Info,
+                                                contentDescription = null,
+                                                tint = Color(0xFF2196F3),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("Refresh Types", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        Spacer(Modifier.height(8.dp))
+                                        Text("• Soft: Clears cache, keeps GPS running", fontSize = 11.sp, color = Color.Gray)
+                                        Text("• Hard: Full reset, restarts GPS", fontSize = 11.sp, color = Color.Gray)
+                                        Text("• Auto: Starts when GPS/TTL active", fontSize = 11.sp, color = Color.Gray)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Custom Max Values",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF6D4C41)
+                        )
+                        TextButton(
+                            onClick = { showMaxValueInputs = !showMaxValueInputs },
+                            enabled = !isIntervalLocked
+                        ) {
+                            Text(if (showMaxValueInputs) "Hide" else "Set Max", fontSize = 12.sp)
+                            Icon(
+                                if (showMaxValueInputs) Icons.Default.KeyboardArrowUp else Icons.Default.Settings,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    if (showMaxValueInputs && !isIntervalLocked) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = highToLowMaxText,
+                                onValueChange = { highToLowMaxText = it.filter { char -> char.isDigit() } },
+                                label = { Text("High→Low Max", fontSize = 11.sp) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = lowToHighMaxText,
+                                onValueChange = { lowToHighMaxText = it.filter { char -> char.isDigit() } },
+                                label = { Text("Low→High Max", fontSize = 11.sp) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                val newHighMax = highToLowMaxText.toIntOrNull()?.coerceIn(10, 300) ?: 60
+                                val newLowMax = lowToHighMaxText.toIntOrNull()?.coerceIn(5, 150) ?: 30
+                                highToLowMax = newHighMax
+                                lowToHighMax = newLowMax
+                                if (highToLowSeconds > highToLowMax) highToLowSeconds = highToLowMax
+                                if (lowToHighSeconds > lowToHighMax) lowToHighSeconds = lowToHighMax
+                                showMaxValueInputs = false
+                                Toast.makeText(context, "Max: ${highToLowMax}s / ${lowToHighMax}s", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Apply Max Values")
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
+                    }
+
+                    Text("High → Low Speed", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Slowing down (3s - ${highToLowMax}s)", fontSize = 11.sp, color = Color.Gray)
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Slider(
+                            value = highToLowSeconds.toFloat(),
+                            onValueChange = { if (!isIntervalLocked) highToLowSeconds = it.toInt() },
+                            enabled = !isIntervalLocked,
+                            valueRange = 3f..highToLowMax.toFloat(),
+                            steps = 0,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = if (isIntervalLocked) Color.Gray else Color(0xFFFF9800),
+                                activeTrackColor = if (isIntervalLocked) Color.Gray else Color(0xFFFF9800)
+                            )
+                        )
+                        Text(
+                            "${highToLowSeconds}s",
+                            modifier = Modifier.width(50.dp),
+                            textAlign = TextAlign.End,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = if (isIntervalLocked) Color.Gray else Color(0xFFFF9800)
+                        )
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(16.dp))
+
+                    Text("Low → High Speed", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Accelerating (3s - ${lowToHighMax}s)", fontSize = 11.sp, color = Color.Gray)
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Slider(
+                            value = lowToHighSeconds.toFloat(),
+                            onValueChange = { if (!isIntervalLocked) lowToHighSeconds = it.toInt() },
+                            enabled = !isIntervalLocked,
+                            valueRange = 3f..lowToHighMax.toFloat(),
+                            steps = 0,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = if (isIntervalLocked) Color.Gray else Color(0xFF4CAF50),
+                                activeTrackColor = if (isIntervalLocked) Color.Gray else Color(0xFF4CAF50)
+                            )
+                        )
+                        Text(
+                            "${lowToHighSeconds}s",
+                            modifier = Modifier.width(50.dp),
+                            textAlign = TextAlign.End,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            color = if (isIntervalLocked) Color.Gray else Color(0xFF4CAF50)
+                        )
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            if (isIntervalLocked) {
+                                isIntervalLocked = false
+                                Toast.makeText(context, "Unlocked", Toast.LENGTH_SHORT).show()
+                            } else {
+                                lockedHighToLow = highToLowSeconds
+                                lockedLowToHigh = lowToHighSeconds
+                                isIntervalLocked = true
+                                Toast.makeText(context, "Locked: ${lockedHighToLow}s / ${lockedLowToHigh}s", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            if (isIntervalLocked) Color(0xFF2E7D32) else Color(0xFF1976D2)
+                        )
+                    ) {
+                        Icon(
+                            if (isIntervalLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (isIntervalLocked) "UNLOCK" else "LOCK & APPLY",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Button(
+                onClick = {
+                    autoSendEnabled = true
+                    Toast.makeText(context, "Auto TTL enabled", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    if (autoSendEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Text("AUTO", fontWeight = FontWeight.Bold)
+            }
+            Button(
+                onClick = {
+                    autoSendEnabled = false
+                    Toast.makeText(context, "Auto TTL disabled", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    if (!autoSendEnabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline
+                )
+            ) {
+                Text("CANCEL", fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(if (ttlConnected) Color(0xFFE8F5E8) else Color(0xFFFFEBEE))
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text(
+                    if (ttlConnected) "TTL Connected" else "TTL Disconnected",
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (ttlConnected) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Success: $ttlSendSuccessCount | Failures: $ttlSendFailureCount",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (lastTtlSentSpeed != null && lastTtlSentTime != null) {
+                        val secondsAgo = (System.currentTimeMillis() - lastTtlSentTime!!) / 1000
+                        Text(
+                            "Last sent: $lastTtlSentSpeed km/h (${secondsAgo}s ago)",
+                            fontSize = 11.sp,
+                            color = Color.Gray,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                if (ttlSendFailureCount > 0) {
+                    Text(
+                        "Recent failures: $ttlSendFailureCount",
+                        fontSize = 12.sp,
+                        color = Color.Red,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // COMMENTED OUT: Test TTL buttons
+        /*
+        if (ttlConnected) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        val testSpeed = 60
+                        Log.d("HomeScreen", "Manual TTL test initiated: $testSpeed km/h")
+                        val success = SerialTtlManager.sendSpeed(testSpeed, context)
+                        Toast.makeText(
+                            context,
+                            "Manual TTL Test: ${if (success) "SUCCESS" else "FAILED"}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        Log.d("HomeScreen", "Manual TTL test result: $success")
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(Color(0xFF9C27B0))
+            ) {
+                Icon(Icons.Default.Send, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Test TTL (60 km/h)", fontWeight = FontWeight.Bold)
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Button(
+                onClick = {
+                    scope.launch {
+                        currentSpeedToSend = 80
+                        Log.d("HomeScreen", "===== TTL CONTINUOUS TEST START =====")
+
+                        for (i in 1..3) {
+                            val testSpeed = 80
+                            Log.d("HomeScreen", "Test send #$i: $testSpeed km/h")
+
+                            val success = sendTtlWithRetry(testSpeed, "manual_test_$i")
+
+                            Toast.makeText(
+                                context,
+                                "Test #$i: ${if (success) "SUCCESS" else "FAILED"} ($testSpeed km/h)",
+                                Toast.LENGTH_SHORT
+                            ).show()
+
+                            if (i < 3) {
+                                for (countdown in 20 downTo 1) {
+                                    Log.d("HomeScreen", "Next test in ${countdown}s...")
+                                    delay(1000)
+                                }
+                            }
+                        }
+
+                        Log.d("HomeScreen", "===== TTL CONTINUOUS TEST COMPLETE =====")
+                        Toast.makeText(
+                            context,
+                            "Continuous test complete - Check logs",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(Color(0xFF00BCD4))
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Test Continuous (3x 20s)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+        */
+
+        // COMMENTED OUT: System Status Card
+        /*
+        if (isGpsActive) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(Color(0xFFF0F0F0))
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("System Status", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("Complete: Continuous TTL + Road Lock + Distance Priority", fontSize = 12.sp, color = Color.Gray)
+                    Text("NO GAPS - Sends every 20s", fontSize = 11.sp, color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
+                    if (isIntervalLocked) {
+                        Text(
+                            "GPS Intervals: ${lockedHighToLow}s / ${lockedLowToHigh}s",
+                            fontSize = 11.sp,
+                            color = Color(0xFF2E7D32),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(8.dp))
+                    Text("TTL Status:", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                    Text("Auto: ${if (autoSendEnabled) "ON" else "OFF"}", fontSize = 11.sp, color = Color.Gray)
+                    Text("Connected: ${if (ttlConnected) "YES" else "NO"}", fontSize = 11.sp, color = Color.Gray)
+                    Text("Background: ${if (ttlBackgroundSenderActive) "ACTIVE" else "INACTIVE"}",
+                        fontSize = 11.sp,
+                        color = if (ttlBackgroundSenderActive) Color(0xFF4CAF50) else Color.Gray,
+                        fontWeight = if (ttlBackgroundSenderActive) FontWeight.Bold else FontWeight.Normal
+                    )
+                    val total = ttlSendSuccessCount + ttlSendFailureCount
+                    val rate = if (total > 0) (ttlSendSuccessCount * 100 / total) else 0
+                    Text("Success Rate: $rate%", fontSize = 11.sp, color = Color.Gray)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        */
+
+        // COMMENTED OUT: Show TTL Debug Info button
+        /*
+        Button(
+            onClick = {
+                val debugInfo = SerialTtlManager.getDebugStatus()
+                Log.d("HomeScreen", "TTL Debug Status:\n$debugInfo")
+                Toast.makeText(context, "Debug info logged", Toast.LENGTH_SHORT).show()
             },
-            containerColor = Color.White,
-            titleContentColor = Color(0xFF374151),
-            textContentColor = Color(0xFF374151)
-        )
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(Color(0xFF607D8B))
+        ) {
+            Icon(Icons.Default.Info, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Show TTL Debug Info")
+        }
+        */
     }
 }

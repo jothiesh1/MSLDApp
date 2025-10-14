@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.gpstracker.msldapp.speedlimited.BLR"
+        applicationId = "com.gpstracker.msldapp.speedlimited.DUBAI"
         minSdk = 28
         targetSdk = 35
         versionCode = 2
@@ -94,7 +94,7 @@ android {
 dependencies {
     // Local libraries
     implementation(files("libs/usbSerialForAndroid-debug.aar"))
-    implementation(files("libs/classes.jar"))
+   // implementation(files("libs/classes.jar"))
 
     // Core Android libraries
     implementation(libs.androidx.core.ktx)
@@ -144,7 +144,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(libs.firebase.database.ktx)
     implementation(libs.androidx.foundation.android)
-
+    implementation(files("libs/usbSerialForAndroid-debug.aar"))
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.junit.jupiter)
@@ -166,6 +166,8 @@ dependencies {
 
     // 🔥 GSON IS ALREADY THERE - GOOD!
     implementation("com.google.code.gson:gson:2.10.1")
+
+    implementation ("androidx.core:core-splashscreen:1.0.1")
 }
 
 // Force resolution strategy for conflicting dependencies
